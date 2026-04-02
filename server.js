@@ -44,12 +44,11 @@ app.get('/auth/callback', async (req, res) => {
 });
 
 app.get('/auth/status', (req, res) => {
-  res.json({ authenticated: !!req.session.tokens });
-});
-
-app.post('/auth/logout', (req, res) => {
-  req.session.destroy();
-  res.json({ ok: true });
+  let tokens = req.session.tokens;
+  if (!tokens && req.headers['x-yt-token']) {
+    try { tokens = JSON.parse(Buffer.from(req.headers['x-yt-token'], 'base64').toString()); } catch(e) {}
+  }
+  res.json({ authenticated: !!tokens });
 });
 
 function requireAuth(req, res, next) {
