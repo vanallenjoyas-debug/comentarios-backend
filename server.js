@@ -62,7 +62,7 @@ app.get('/comments', requireAuth, async (req, res) => {
     const { pageToken } = req.query;
     const response = await youtube.commentThreads.list({
       part: ['snippet'],
-      allThreadsRelatedToChannelId: process.env.YOUTUBE_CHANNEL_ID,
+      allThreadsRelatedToChannelId: process.env.YOUTUBE_CHANNEL_ID,       order: 'time',
       moderationStatus: 'published',
       maxResults: 20,
       pageToken: pageToken || undefined
