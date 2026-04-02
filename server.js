@@ -6,7 +6,7 @@ const session = require('express-session');
 const app = express();
 app.use(express.json());
 app.use(cors({
-  origin: ['https://storied-squirrel-fb5eea.netlify.app', 'http://localhost:3000'],
+  origin: ['https://storied-squirrel-fb5eea.netlify.app', 'https://moonlit-crumble-d1585d.netlify.app', 'http://localhost:3000'],
   credentials: true
 }));
 app.use(session({
