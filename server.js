@@ -36,7 +36,8 @@ app.get('/auth/callback', async (req, res) => {
   try {
     const { tokens } = await oauth2Client.getToken(code);
     req.session.tokens = tokens;
-    res.redirect(process.env.FRONTEND_URL + '?auth=success');
+    const tokenEncoded = Buffer.from(JSON.stringify(tokens)).toString('base64');
+    res.redirect(process.env.FRONTEND_URL + '?auth=success&token=' + tokenEncoded);
   } catch (e) {
     res.redirect(process.env.FRONTEND_URL + '?auth=error');
   }
