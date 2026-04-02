@@ -53,8 +53,13 @@ app.post('/auth/logout', (req, res) => {
 });
 
 function requireAuth(req, res, next) {
-  if (!req.session.tokens) return res.status(401).json({ error: 'No autenticado' });
-  oauth2Client.setCredentials(req.session.tokens);
+  let tokens = req.session.tokens;
+  if (!tokens && req.headers['x-yt-token']) {
+    try { tokens = JSON.parse(Buffer.from(req.headers['x-yt-token'], 'base64').toString()); } catch(e) {}
+  }
+  if (!tokens) return res.status(401).json({ error: 'No autenticado' });
+  oauth2Client.setCredentials(tokens);
+  req.ytTokens = tokens;
   next();
 }
 
