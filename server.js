@@ -22,6 +22,8 @@ const oauth2Client = new google.auth.OAuth2(
   process.env.REDIRECT_URI
 );
 
+// ─── YouTube Auth ─────────────────────────────────────────────────────────────
+
 app.get('/auth/youtube', (req, res) => {
   const url = oauth2Client.generateAuthUrl({
     access_type: 'offline',
@@ -61,6 +63,8 @@ function requireAuth(req, res, next) {
   req.ytTokens = tokens;
   next();
 }
+
+// ─── YouTube Endpoints ────────────────────────────────────────────────────────
 
 app.get('/comments', requireAuth, async (req, res) => {
   try {
@@ -117,6 +121,73 @@ app.get('/video/:id', requireAuth, async (req, res) => {
   }
 });
 
+// ─── Facebook Endpoints ───────────────────────────────────────────────────────
+
+const FB_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
+const FB_PAGE_ID = process.env.FB_PAGE_ID;
+
+app.get('/fb/comments', async (req, res) => {
+  try {
+    const { after } = req.query;
+    let url = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/feed?fields=id,message,created_time,comments{id,message,from,created_time}&limit=10&access_token=${FB_TOKEN}`;
+    if (after) url += `&after=${after}`;
+
+    const r = await fetch(url);
+    const data = await r.json();
+
+    if (!r.ok) {
+      console.error('FB error:', JSON.stringify(data));
+      return res.status(500).json({ error: data.error?.message || 'Error de Facebook' });
+    }
+
+    const comments = [];
+    for (const post of (data.data || [])) {
+      if (!post.comments?.data?.length) continue;
+      for (const c of post.comments.data) {
+        comments.push({
+          id: c.id,
+          postId: post.id,
+          postMessage: post.message || '',
+          text: c.message,
+          author: c.from?.name || 'Usuario',
+          authorPhoto: `https://graph.facebook.com/${c.from?.id}/picture?type=square`,
+          publishedAt: c.created_time,
+          network: 'fb'
+        });
+      }
+    }
+
+    const nextCursor = data.paging?.cursors?.after || null;
+    res.json({ comments, nextCursor });
+  } catch (e) {
+    console.error('fb/comments error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/fb/comments/:id/reply', async (req, res) => {
+  const { id } = req.params;
+  const { text } = req.body;
+  try {
+    const r = await fetch(`https://graph.facebook.com/v19.0/${id}/comments`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: text, access_token: FB_TOKEN })
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      console.error('FB reply error:', JSON.stringify(data));
+      return res.status(500).json({ error: data.error?.message || 'Error al responder' });
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('fb reply error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── IA Sugerencias ───────────────────────────────────────────────────────────
+
 function randomInt(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
@@ -161,7 +232,6 @@ IDENTIDAD
 CATEGORIAS DE RESPUESTA
 
 1. ELOGIOS AL CANAL O CONTENIDO
-(muy bien canal, que grande, excelente contenido, me encanta, tenes que cerrar el laboratorio, solo los genios hacen eso, etc.)
 Opciones: "muchas gracias por el aguante bro" / "gracias bro, me alegro que te guste" / "abrazo bro 🤘" / "no te vas a arrepentir 💪" / "gracias, bienvenido 😄"
 
 2. SALUDOS DESDE OTROS PAISES
@@ -187,8 +257,8 @@ Si es otra cosa: "se consigue en casas de insumos para joyeros"
 
 8. COMPARACIONES CON EL YETI O HIBRIDO O BRUTA COCINA
 Para "hibrido" o "sos el yeti": "eso dicen" / "asi parece" / "vos decis?"
-Para cuando mencionan al yeti de Bruta Cocina especificamente: "no, soy primo del Dibu 🧌" / "el yeti somos todos 🧌"
-Para cualquier referencia a Bruta Cocina (tio, franquicia, bruta quimica, plagio): "jaja podriamos ser una franquicia tranquilamente 😄" / "podriamos ser una sucursal 😄" / "eso dicen 😄" / "es verdad, tranquilamente podria ser 😄"
+Para cuando mencionan al yeti de Bruta Cocina: "no, soy primo del Dibu 🧌" / "el yeti somos todos 🧌"
+Para cualquier referencia a Bruta Cocina: "jaja podriamos ser una franquicia tranquilamente 😄" / "podriamos ser una sucursal 😄" / "eso dicen 😄"
 Para comparaciones con otros youtubers: "vos decis? siempre me comparan con alguien" / "jaja sera 😄"
 Para "ya no haces recetas": "no 😄" / "ahora abrimos franquicia de joyeria 😄"
 
@@ -219,7 +289,6 @@ Opciones: "me alegro que te guste, muchas gracias" / "gracias, fue hecha con muc
 
 17. BANCADA JOYERIA SUDACA
 Opciones: "todos somos joyeria sudaca 🤘" / "ese es el espiritu 🤘"
-Solo cuando mencionan explicitamente Joyeria Sudaca como marca.
 
 18. OFRECEN MATERIAL PARA VENDER
 Opcion: "hola, como estas! escribime por privado de Instagram 📩"
@@ -235,7 +304,7 @@ Opciones: "bueno, habia que seguir trabajando y necesitaba el metal 🤷" / "el 
 Opciones: "amen 🙏" / "bendiciones 🙏"
 
 22. COMENTARIOS SOLO CON EMOJIS
-Responder solo con emojis, sin texto. Usar el mismo emoji o uno que responda al tono.
+Responder solo con emojis, sin texto.
 
 23. COMENTARIOS SIN CONTEXTO CLARO PERO TONO SIMPATICO
 Opciones: "y si, el oficio es asi" / "puede pasar" / "parte del trabajo"
@@ -245,11 +314,9 @@ Opciones: "yo lo escribo con c 😄" / "cada uno lo escribe como quiere, yo con 
 
 25. PREGUNTAS SOBRE SI ALGO SE PUEDE FUNDIR O CONVERTIR EN LINGOTE
 Opciones: "si, se puede fundir y hacer un lingote" / "si, el bronce/cobre/etc. se funde sin problema"
-Usar logica: si el metal se puede fundir, la respuesta es si.
 
 26. REFERENCIAS CULTURALES O CHISTES (Breaking Bad, Heisenberg, etc.)
 Opciones: "jaja algo escuche 😂" / "el nombre me suena 😂" / "puede ser que hayamos trabajado juntos 😂"
-Con emoji porque hay humor compartido.
 
 27. ACUSAN DE COPIAR ESTILO O PLAGIO
 Opciones: "yo hablo asi, no me copio de nadie" / "siempre hable asi" / "es mi forma de hablar"
