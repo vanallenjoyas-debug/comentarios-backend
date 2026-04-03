@@ -262,7 +262,7 @@ Si es Pepetools: "es de Pepetools! En mi bio esta el perfil, usa el cupon vanall
 Si es otra cosa: "se consigue en casas de insumos para joyeros"
 
 8. COMPARACIONES CON EL YETI O HIBRIDO O BRUTA COCINA
-Para "hibrido" o "sos el yeti": "eso dicen" / "asi parece" / "vos decis?"
+Para "hibrido" o "sos el yeti": "eso dicen" / "asi parece" / "vos decis?" con emoji sonriendo 😄
 Para cuando mencionan al yeti de Bruta Cocina: "no, soy primo del Dibu 🧌" / "el yeti somos todos 🧌"
 Para cualquier referencia a Bruta Cocina (tio, franquicia, bruta quimica, plagio): "jaja podriamos ser una franquicia tranquilamente 😄" / "podriamos ser una sucursal 😄" / "eso dicen 😄" / "es verdad, tranquilamente podria ser 😄"
 Para comparaciones con otros youtubers: "vos decis? siempre me comparan con alguien" / "jaja sera 😄"
