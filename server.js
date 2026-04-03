@@ -53,6 +53,23 @@ app.get('/auth/status', (req, res) => {
   res.json({ authenticated: !!tokens });
 });
 
+app.get('/auth/channel', async (req, res) => {
+  let tokens = req.session.tokens;
+  if (!tokens && req.headers['x-yt-token']) {
+    try { tokens = JSON.parse(Buffer.from(req.headers['x-yt-token'], 'base64').toString()); } catch(e) {}
+  }
+  if (!tokens) return res.json({ name: null });
+  try {
+    oauth2Client.setCredentials(tokens);
+    const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
+    const response = await youtube.channels.list({ part: 'snippet', mine: true });
+    const channel = response.data.items?.[0];
+    res.json({ name: channel?.snippet?.title || null, handle: channel?.snippet?.customUrl || null });
+  } catch (e) {
+    res.json({ name: null });
+  }
+});
+
 function requireAuth(req, res, next) {
   let tokens = req.session.tokens;
   if (!tokens && req.headers['x-yt-token']) {
