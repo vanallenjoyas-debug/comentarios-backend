@@ -22,8 +22,6 @@ const oauth2Client = new google.auth.OAuth2(
   process.env.REDIRECT_URI
 );
 
-// ─── YouTube Auth ─────────────────────────────────────────────────────────────
-
 app.get('/auth/youtube', (req, res) => {
   const url = oauth2Client.generateAuthUrl({
     access_type: 'offline',
@@ -81,8 +79,6 @@ function requireAuth(req, res, next) {
   next();
 }
 
-// ─── YouTube Endpoints ────────────────────────────────────────────────────────
-
 app.get('/comments', requireAuth, async (req, res) => {
   try {
     const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
@@ -138,8 +134,6 @@ app.get('/video/:id', requireAuth, async (req, res) => {
   }
 });
 
-// ─── Facebook Endpoints ───────────────────────────────────────────────────────
-
 const FB_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
 const FB_PAGE_ID = process.env.FB_PAGE_ID;
 
@@ -148,15 +142,12 @@ app.get('/fb/comments', async (req, res) => {
     const { after } = req.query;
     let url = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/feed?fields=id,message,created_time,comments{id,message,from,created_time}&limit=10&access_token=${FB_TOKEN}`;
     if (after) url += `&after=${after}`;
-
     const r = await fetch(url);
     const data = await r.json();
-
     if (!r.ok) {
       console.error('FB error:', JSON.stringify(data));
       return res.status(500).json({ error: data.error?.message || 'Error de Facebook' });
     }
-
     const comments = [];
     for (const post of (data.data || [])) {
       if (!post.comments?.data?.length) continue;
@@ -173,7 +164,6 @@ app.get('/fb/comments', async (req, res) => {
         });
       }
     }
-
     const nextCursor = data.paging?.cursors?.after || null;
     res.json({ comments, nextCursor });
   } catch (e) {
@@ -202,8 +192,6 @@ app.post('/fb/comments/:id/reply', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
-
-// ─── IA Sugerencias ───────────────────────────────────────────────────────────
 
 function randomInt(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
@@ -249,6 +237,7 @@ IDENTIDAD
 CATEGORIAS DE RESPUESTA
 
 1. ELOGIOS AL CANAL O CONTENIDO
+(muy bien canal, que grande, excelente contenido, me encanta, tenes que cerrar el laboratorio, solo los genios hacen eso, etc.)
 Opciones: "muchas gracias por el aguante bro" / "gracias bro, me alegro que te guste" / "abrazo bro 🤘" / "no te vas a arrepentir 💪" / "gracias, bienvenido 😄"
 
 2. SALUDOS DESDE OTROS PAISES
@@ -275,7 +264,7 @@ Si es otra cosa: "se consigue en casas de insumos para joyeros"
 8. COMPARACIONES CON EL YETI O HIBRIDO O BRUTA COCINA
 Para "hibrido" o "sos el yeti": "eso dicen" / "asi parece" / "vos decis?"
 Para cuando mencionan al yeti de Bruta Cocina: "no, soy primo del Dibu 🧌" / "el yeti somos todos 🧌"
-Para cualquier referencia a Bruta Cocina: "jaja podriamos ser una franquicia tranquilamente 😄" / "podriamos ser una sucursal 😄" / "eso dicen 😄"
+Para cualquier referencia a Bruta Cocina (tio, franquicia, bruta quimica, plagio): "jaja podriamos ser una franquicia tranquilamente 😄" / "podriamos ser una sucursal 😄" / "eso dicen 😄" / "es verdad, tranquilamente podria ser 😄"
 Para comparaciones con otros youtubers: "vos decis? siempre me comparan con alguien" / "jaja sera 😄"
 Para "ya no haces recetas": "no 😄" / "ahora abrimos franquicia de joyeria 😄"
 
@@ -306,6 +295,7 @@ Opciones: "me alegro que te guste, muchas gracias" / "gracias, fue hecha con muc
 
 17. BANCADA JOYERIA SUDACA
 Opciones: "todos somos joyeria sudaca 🤘" / "ese es el espiritu 🤘"
+Solo cuando mencionan explicitamente Joyeria Sudaca como marca.
 
 18. OFRECEN MATERIAL PARA VENDER
 Opcion: "hola, como estas! escribime por privado de Instagram 📩"
@@ -338,13 +328,16 @@ Opciones: "jaja algo escuche 😂" / "el nombre me suena 😂" / "puede ser que 
 27. ACUSAN DE COPIAR ESTILO O PLAGIO
 Opciones: "yo hablo asi, no me copio de nadie" / "siempre hable asi" / "es mi forma de hablar"
 
+28. CUESTIONAN UNA DECISION DE DISENO (simbolo mal usado, runa incorrecta, elemento que no corresponde)
+Opciones: "el joyero soy yo, la puse asi a proposito 😄" / "era parte del diseno bro 🔥" / "asi la pidio el cliente 🙌"
+
 INSTRUCCION FINAL
 - Da UNA SOLA respuesta lista para publicar
 - Sin comillas, sin explicaciones, sin numeracion
 - Si no entra en ninguna categoria, responde con calidez imitando el estilo de Javi
 - Nunca inventar informacion tecnica
 
-Comentario: ${comment}`;
+Comentario: `;
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -357,20 +350,17 @@ Comentario: ${comment}`;
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 150,
-        messages: [{ role: 'user', content: prompt }]
+        messages: [{ role: 'user', content: prompt + comment }]
       })
     });
 
     const data = await response.json();
-
     if (!response.ok) {
       console.error('Anthropic error:', JSON.stringify(data));
       return res.status(500).json({ error: data.error?.message || 'Error de API' });
     }
-
     const suggestion = data.content?.[0]?.text || '';
     res.json({ suggestion });
-
   } catch (e) {
     console.error('suggest-reply error:', e.message);
     res.status(500).json({ error: e.message });
