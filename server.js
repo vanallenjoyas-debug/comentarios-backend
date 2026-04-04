@@ -316,6 +316,8 @@ CATEGORIAS
 25. Breaking Bad/Heisenberg: "jaja algo escuche 😂" / "el nombre me suena 😂"
 26. Acusan de plagio: "yo hablo asi, no me copio de nadie" / "siempre hable asi"
 27. Cuestionan diseño: "el joyero soy yo, la puse asi a proposito 😄" / "asi la pidio el cliente 🙌"
+28. No era mas facil fundirlas o fundirlos: "si solo fundo no se que calidad tiene el metal, refinando garantizo la pureza" / "como joyero tengo que saber que vendo y si simplente lo fundo no se la calidad del metal" 
+29. Vendes cadenas? / Vendes dijes?: "Si vendo contactame por mensaje privado de instagram por favor 🙌"
 
 INSTRUCCION: Da UNA SOLA respuesta lista para publicar, sin comillas ni explicaciones.
 
