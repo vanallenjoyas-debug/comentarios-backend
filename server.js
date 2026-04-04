@@ -10,13 +10,13 @@ app.use(express.json());
 app.use(cors({
   origin: ['https://storied-squirrel-fb5eea.netlify.app', 'https://moonlit-crumble-d1585d.netlify.app', 'https://vanallenjoyas-debug.github.io', 'http://localhost:3000'],
   credentials: true
-}));
+});
 app.use(session({
   secret: process.env.SESSION_SECRET || 'sudaca-secret-2024',
   resave: false,
   saveUninitialized: false,
   cookie: { secure: process.env.NODE_ENV === 'production', maxAge: 7 * 24 * 60 * 60 * 1000 }
-}));
+});
 
 // ─── Estado persistente en archivo ───────────────────────────────────────────
 const STATE_FILE = '/tmp/comment-state.json';
@@ -126,32 +126,39 @@ app.post('/state/discarded', (req, res) => {
 
 // ─── YouTube Endpoints ────────────────────────────────────────────────────────
 
+const MY_CHANNEL_ID = 'UCsGYMvcMeUCxXIx--A7SU6w';
 app.get('/comments', requireAuth, async (req, res) => {
   try {
     const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
     const { pageToken } = req.query;
     const response = await youtube.commentThreads.list({
-      part: 'snippet',
+      part: 'snippet,replies',
       allThreadsRelatedToChannelId: process.env.YOUTUBE_CHANNEL_ID,
       maxResults: 50,
       order: 'time',
       pageToken: pageToken || undefined
     });
-    const comments = response.data.items.map(item => ({
-      id: item.id,
-      videoId: item.snippet.videoId,
-      text: item.snippet.topLevelComment.snippet.textDisplay,
-      author: item.snippet.topLevelComment.snippet.authorDisplayName,
-      authorPhoto: item.snippet.topLevelComment.snippet.authorProfileImageUrl,
-      publishedAt: item.snippet.topLevelComment.snippet.publishedAt,
-      likeCount: item.snippet.topLevelComment.snippet.likeCount,
-      replyCount: item.snippet.totalReplyCount
-    }));
+    const comments = response.data.items.map(item => {
+      const replies = item.replies?.comments || [];
+      const answeredByMe = replies.some(r => r.snippet.authorChannelId?.value === MY_CHANNEL_ID);
+      return {
+        id: item.id,
+        videoId: item.snippet.videoId,
+        text: item.snippet.topLevelComment.snippet.textDisplay,
+        author: item.snippet.topLevelComment.snippet.authorDisplayName,
+        authorPhoto: item.snippet.topLevelComment.snippet.authorProfileImageUrl,
+        publishedAt: item.snippet.topLevelComment.snippet.publishedAt,
+        likeCount: item.snippet.topLevelComment.snippet.likeCount,
+        replyCount: item.snippet.totalReplyCount,
+        answeredByMe
+      };
+    });
     res.json({ comments, nextPageToken: response.data.nextPageToken || null });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
   }
+});
 });
 
 app.post('/comments/:id/reply', requireAuth, async (req, res) => {
@@ -160,7 +167,7 @@ app.post('/comments/:id/reply', requireAuth, async (req, res) => {
   try {
     const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
     await youtube.comments.insert({
-      part: 'snippet',
+      part: 'snippet,replies',
       requestBody: { snippet: { parentId: id, textOriginal: text } }
     });
     // Marcar como respondido en el estado del servidor
@@ -426,3 +433,4 @@ Comentario: `;
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
+
