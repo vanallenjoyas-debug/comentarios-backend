@@ -10,13 +10,13 @@ app.use(express.json());
 app.use(cors({
   origin: ['https://storied-squirrel-fb5eea.netlify.app', 'https://moonlit-crumble-d1585d.netlify.app', 'https://vanallenjoyas-debug.github.io', 'http://localhost:3000'],
   credentials: true
-});
+}));
 app.use(session({
   secret: process.env.SESSION_SECRET || 'sudaca-secret-2024',
   resave: false,
   saveUninitialized: false,
   cookie: { secure: process.env.NODE_ENV === 'production', maxAge: 7 * 24 * 60 * 60 * 1000 }
-});
+}));
 
 // ─── Estado persistente en archivo ───────────────────────────────────────────
 const STATE_FILE = '/tmp/comment-state.json';
