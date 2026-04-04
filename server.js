@@ -166,7 +166,7 @@ app.post('/comments/:id/reply', requireAuth, async (req, res) => {
   try {
     const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
     await youtube.comments.insert({
-      part: 'snippet,replies',
+      part: 'snippet',
       requestBody: { snippet: { parentId: id, textOriginal: text } }
     });
     // Marcar como respondido en el estado del servidor
