@@ -159,7 +159,6 @@ app.get('/comments', requireAuth, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
-});
 
 app.post('/comments/:id/reply', requireAuth, async (req, res) => {
   const { id } = req.params;
