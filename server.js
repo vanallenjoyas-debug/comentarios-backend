@@ -1,4 +1,4 @@
-// v7
+// v8
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -24,7 +24,8 @@ app.use(session({
 }));
 
 // ─── PostgreSQL ───────────────────────────────────────────────────────────────
-const pool = new Pool({ connectionString: process.env.PG_URL || process.env.DATABASE_URL });
+console.log("DB URL:", process.env.PG_URL || process.env.DATABASE_URL || "NO URL FOUND");
+const pool = new Pool({ connectionString: process.env.PG_URL });
 
 async function initDB() {
   await pool.query(`
