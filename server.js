@@ -255,6 +255,7 @@ app.post('/fb/comments/:id/reply', async (req, res) => {
 const makeComments = [];
 
 app.post('/webhook/facebook-make', (req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
   const c = req.body;
   if (!c || !c.id) return res.status(400).json({ error: 'Datos invalidos' });
   const state = loadState();
