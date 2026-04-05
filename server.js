@@ -1,4 +1,4 @@
-// v2 
+// v3
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -251,6 +251,56 @@ app.post('/fb/comments/:id/reply', async (req, res) => {
   }
 });
 
+// ─── Make.com Facebook webhook ────────────────────────────────────────────────
+const makeComments = [];
+
+app.post('/webhook/facebook-make', (req, res) => {
+  const c = req.body;
+  if (!c || !c.id) return res.status(400).json({ error: 'Datos invalidos' });
+  const state = loadState();
+  if (!state.discarded.includes(c.id)) {
+    const exists = makeComments.find(x => x.id === c.id);
+    if (!exists) {
+      makeComments.push({
+        id: c.id,
+        text: c.text || '',
+        author: c.author || 'Usuario',
+        authorId: c.authorId || '',
+        postId: c.postId || '',
+        publishedAt: c.publishedAt || new Date().toISOString(),
+        network: 'fb'
+      });
+    }
+  }
+  res.json({ ok: true });
+});
+
+app.get('/fb/make-comments', (req, res) => {
+  const state = loadState();
+  const filtered = makeComments
+    .filter(c => !state.discarded.includes(c.id))
+    .map(c => ({ ...c, answered: state.answered.includes(c.id) }));
+  res.json({ comments: filtered });
+});
+
+// ─── Facebook Webhook verificacion ───────────────────────────────────────────
+app.get('/webhook/facebook', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+  if (mode === 'subscribe' && token === 'sudaca2024') {
+    console.log('Facebook webhook verificado');
+    res.status(200).send(challenge);
+  } else {
+    res.status(403).send('Forbidden');
+  }
+});
+
+app.post('/webhook/facebook', (req, res) => {
+  console.log('FB webhook event:', JSON.stringify(req.body));
+  res.status(200).send('EVENT_RECEIVED');
+});
+
 // ─── IA Sugerencias ───────────────────────────────────────────────────────────
 function randomInt(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
@@ -316,9 +366,9 @@ CATEGORIAS
 25. Breaking Bad/Heisenberg: "jaja algo escuche 😂" / "el nombre me suena 😂"
 26. Acusan de plagio: "yo hablo asi, no me copio de nadie" / "siempre hable asi"
 27. Cuestionan diseño: "el joyero soy yo, la puse asi a proposito 😄" / "asi la pidio el cliente 🙌"
-28. No era mas facil fundirlas o fundirlos: "si solo fundo no se que calidad tiene el metal, refinando garantizo la pureza" / "como joyero tengo que saber que vendo y si simplente lo fundo no se la calidad del metal" 
+28. No era mas facil fundirlas: "si solo fundo no se que calidad tiene el metal, refinando garantizo la pureza" / "como joyero tengo que saber que vendo y si simplente lo fundo no se la calidad del metal"
 29. Vendes: "Si vendo contactame por mensaje privado de instagram por favor 🙌"
-30. Tenes tienda? / haces envio?: "Si tengo tienda y hago enviis a todo el mundo, link en mi perfil"
+30. Tenes tienda? / haces envio?: "Si tengo tienda y hago envios a todo el mundo, link en mi perfil"
 
 INSTRUCCION: Da UNA SOLA respuesta lista para publicar, sin comillas ni explicaciones.
 
