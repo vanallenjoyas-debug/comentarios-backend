@@ -32,6 +32,7 @@ async function initDB() {
       id TEXT PRIMARY KEY,
       status TEXT NOT NULL,
       comment_text TEXT,
+      video_title TEXT,
       reply_text TEXT,
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
@@ -46,12 +47,12 @@ async function getState() {
   return { answered, discarded };
 }
 
-async function markAnswered(id, commentText, replyText) {
+async function markAnswered(id, commentText, replyText, videoTitle) {
   await pool.query(`
-    INSERT INTO comment_state (id, status, comment_text, reply_text)
-    VALUES ($1, 'answered', $2, $3)
-    ON CONFLICT (id) DO UPDATE SET status='answered', reply_text=$3
-  `, [id, commentText || '', replyText || '']);
+    INSERT INTO comment_state (id, status, comment_text, reply_text, video_title)
+    VALUES ($1, 'answered', $2, $3, $4)
+    ON CONFLICT (id) DO UPDATE SET status='answered', reply_text=$3, video_title=$4
+  `, [id, commentText || '', replyText || '', videoTitle || '']);
 }
 
 async function markDiscarded(id) {
@@ -64,7 +65,7 @@ async function markDiscarded(id) {
 
 async function getExamples(limit = 20) {
   const res = await pool.query(`
-    SELECT comment_text, reply_text FROM comment_state
+    SELECT comment_text, reply_text, video_title FROM comment_state
     WHERE status = 'answered' AND comment_text != '' AND reply_text != ''
     ORDER BY created_at DESC LIMIT $1
   `, [limit]);
@@ -199,7 +200,7 @@ app.post('/comments/:id/reply', requireAuth, async (req, res) => {
       part: 'snippet',
       requestBody: { snippet: { parentId: id, textOriginal: text } }
     });
-    await markAnswered(id, commentText || '', text);
+    await markAnswered(id, commentText || '', text, req.body.videoTitle || '');
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
@@ -332,7 +333,7 @@ app.post('/fb/comments/:id/reply', async (req, res) => {
       console.error('FB reply error:', JSON.stringify(data));
       return res.status(500).json({ error: data.error?.message || 'Error al responder' });
     }
-    await markAnswered(id, commentText || '', text);
+    await markAnswered(id, commentText || '', text, req.body.videoTitle || '');
     res.json({ ok: true });
   } catch (e) {
     console.error('fb reply error:', e.message);
@@ -405,7 +406,7 @@ app.post('/suggest-reply', async (req, res) => {
     if (examples.length > 0) {
       ejemplos = '\n\nEJEMPLOS REALES DE COMO RESPONDE JAVI (usar como referencia principal):\n';
       examples.forEach((ex, i) => {
-        ejemplos += `\nEjemplo ${i+1}:\nComentario: "${ex.comment_text}"\nRespuesta de Javi: "${ex.reply_text}"\n`;
+        ejemplos += `\nEjemplo ${i+1}:${ex.video_title ? "\n(Video: "+ex.video_title+")" : ""}\nComentario: "${ex.comment_text}"\nRespuesta de Javi: "${ex.reply_text}"\n`;
       });
       ejemplos += '\nUsar estos ejemplos como guia principal de estilo, tono y longitud.\n';
     }
