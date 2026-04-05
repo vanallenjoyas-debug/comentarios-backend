@@ -1,4 +1,4 @@
-// v4
+// v3
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -189,6 +189,68 @@ app.get('/video/:id', requireAuth, async (req, res) => {
   }
 });
 
+
+// ─── Videos del canal con comentarios ────────────────────────────────────────
+app.get('/channel/videos', requireAuth, async (req, res) => {
+  try {
+    const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
+    const { pageToken } = req.query;
+    const response = await youtube.search.list({
+      part: 'snippet',
+      channelId: process.env.YOUTUBE_CHANNEL_ID,
+      type: 'video',
+      order: 'date',
+      maxResults: 50,
+      pageToken: pageToken || undefined
+    });
+    const videos = response.data.items.map(item => ({
+      id: item.id.videoId,
+      title: item.snippet.title,
+      publishedAt: item.snippet.publishedAt,
+      thumbnail: item.snippet.thumbnails?.default?.url || ''
+    }));
+    res.json({ videos, nextPageToken: response.data.nextPageToken || null });
+  } catch (e) {
+    console.error('channel/videos error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/video/:id/comments', requireAuth, async (req, res) => {
+  try {
+    const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
+    const { pageToken } = req.query;
+    const response = await youtube.commentThreads.list({
+      part: 'snippet,replies',
+      videoId: req.params.id,
+      maxResults: 100,
+      order: 'time',
+      pageToken: pageToken || undefined
+    });
+    const state = loadState();
+    const comments = response.data.items.map(item => {
+      const replies = item.replies?.comments || [];
+      const answeredByMe = replies.some(r => r.snippet.authorChannelId?.value === MY_CHANNEL_ID);
+      return {
+        id: item.id,
+        videoId: req.params.id,
+        text: item.snippet.topLevelComment.snippet.textDisplay,
+        author: item.snippet.topLevelComment.snippet.authorDisplayName,
+        authorPhoto: item.snippet.topLevelComment.snippet.authorProfileImageUrl,
+        publishedAt: item.snippet.topLevelComment.snippet.publishedAt,
+        likeCount: item.snippet.topLevelComment.snippet.likeCount,
+        replyCount: item.snippet.totalReplyCount,
+        answeredByMe,
+        answered: answeredByMe || state.answered.includes(item.id),
+        network: 'yt'
+      };
+    });
+    res.json({ comments, nextPageToken: response.data.nextPageToken || null });
+  } catch (e) {
+    console.error('video comments error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 // ─── Facebook Endpoints ───────────────────────────────────────────────────────
 const FB_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
 const FB_PAGE_ID = process.env.FB_PAGE_ID;
