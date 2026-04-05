@@ -1,9 +1,9 @@
-// v3
+// v5
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
 const session = require('express-session');
-const fs = require('fs');
+const { Pool } = require('pg');
 
 const app = express();
 app.use(express.json());
@@ -23,18 +23,52 @@ app.use(session({
   cookie: { secure: process.env.NODE_ENV === 'production', maxAge: 7 * 24 * 60 * 60 * 1000 }
 }));
 
-// ─── Estado persistente ───────────────────────────────────────────────────────
-const STATE_FILE = '/tmp/comment-state.json';
+// ─── PostgreSQL ───────────────────────────────────────────────────────────────
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
-function loadState() {
-  try {
-    if (fs.existsSync(STATE_FILE)) return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-  } catch(e) {}
-  return { answered: [], discarded: [] };
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS comment_state (
+      id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      comment_text TEXT,
+      reply_text TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  console.log('DB lista');
 }
 
-function saveState(state) {
-  try { fs.writeFileSync(STATE_FILE, JSON.stringify(state)); } catch(e) {}
+async function getState() {
+  const res = await pool.query(`SELECT id, status FROM comment_state`);
+  const answered = res.rows.filter(r => r.status === 'answered').map(r => r.id);
+  const discarded = res.rows.filter(r => r.status === 'discarded').map(r => r.id);
+  return { answered, discarded };
+}
+
+async function markAnswered(id, commentText, replyText) {
+  await pool.query(`
+    INSERT INTO comment_state (id, status, comment_text, reply_text)
+    VALUES ($1, 'answered', $2, $3)
+    ON CONFLICT (id) DO UPDATE SET status='answered', reply_text=$3
+  `, [id, commentText || '', replyText || '']);
+}
+
+async function markDiscarded(id) {
+  await pool.query(`
+    INSERT INTO comment_state (id, status)
+    VALUES ($1, 'discarded')
+    ON CONFLICT (id) DO UPDATE SET status='discarded'
+  `, [id]);
+}
+
+async function getExamples(limit = 20) {
+  const res = await pool.query(`
+    SELECT comment_text, reply_text FROM comment_state
+    WHERE status = 'answered' AND comment_text != '' AND reply_text != ''
+    ORDER BY created_at DESC LIMIT $1
+  `, [limit]);
+  return res.rows;
 }
 
 // ─── YouTube Auth ─────────────────────────────────────────────────────────────
@@ -101,26 +135,23 @@ function requireAuth(req, res, next) {
 }
 
 // ─── Estado endpoints ─────────────────────────────────────────────────────────
-app.get('/state', (req, res) => {
-  res.json(loadState());
+app.get('/state', async (req, res) => {
+  try { res.json(await getState()); }
+  catch(e) { res.json({ answered: [], discarded: [] }); }
 });
 
-app.post('/state/answered', (req, res) => {
-  const { id } = req.body;
+app.post('/state/answered', async (req, res) => {
+  const { id, commentText, replyText } = req.body;
   if (!id) return res.status(400).json({ error: 'Falta id' });
-  const state = loadState();
-  if (!state.answered.includes(id)) state.answered.push(id);
-  saveState(state);
-  res.json({ ok: true });
+  try { await markAnswered(id, commentText, replyText); res.json({ ok: true }); }
+  catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post('/state/discarded', (req, res) => {
+app.post('/state/discarded', async (req, res) => {
   const { id } = req.body;
   if (!id) return res.status(400).json({ error: 'Falta id' });
-  const state = loadState();
-  if (!state.discarded.includes(id)) state.discarded.push(id);
-  saveState(state);
-  res.json({ ok: true });
+  try { await markDiscarded(id); res.json({ ok: true }); }
+  catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // ─── YouTube Endpoints ────────────────────────────────────────────────────────
@@ -161,16 +192,14 @@ app.get('/comments', requireAuth, async (req, res) => {
 
 app.post('/comments/:id/reply', requireAuth, async (req, res) => {
   const { id } = req.params;
-  const { text } = req.body;
+  const { text, commentText } = req.body;
   try {
     const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
     await youtube.comments.insert({
       part: 'snippet',
       requestBody: { snippet: { parentId: id, textOriginal: text } }
     });
-    const state = loadState();
-    if (!state.answered.includes(id)) state.answered.push(id);
-    saveState(state);
+    await markAnswered(id, commentText || '', text);
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
@@ -189,8 +218,7 @@ app.get('/video/:id', requireAuth, async (req, res) => {
   }
 });
 
-
-// ─── Videos del canal con comentarios ────────────────────────────────────────
+// ─── Videos del canal ─────────────────────────────────────────────────────────
 app.get('/channel/videos', requireAuth, async (req, res) => {
   try {
     const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
@@ -227,7 +255,7 @@ app.get('/video/:id/comments', requireAuth, async (req, res) => {
       order: 'time',
       pageToken: pageToken || undefined
     });
-    const state = loadState();
+    const state = await getState();
     const comments = response.data.items.map(item => {
       const replies = item.replies?.comments || [];
       const answeredByMe = replies.some(r => r.snippet.authorChannelId?.value === MY_CHANNEL_ID);
@@ -251,6 +279,7 @@ app.get('/video/:id/comments', requireAuth, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
 // ─── Facebook Endpoints ───────────────────────────────────────────────────────
 const FB_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
 const FB_PAGE_ID = process.env.FB_PAGE_ID;
@@ -291,7 +320,7 @@ app.get('/fb/comments', async (req, res) => {
 
 app.post('/fb/comments/:id/reply', async (req, res) => {
   const { id } = req.params;
-  const { text } = req.body;
+  const { text, commentText } = req.body;
   try {
     const r = await fetch(`https://graph.facebook.com/v19.0/${id}/comments`, {
       method: 'POST',
@@ -303,9 +332,7 @@ app.post('/fb/comments/:id/reply', async (req, res) => {
       console.error('FB reply error:', JSON.stringify(data));
       return res.status(500).json({ error: data.error?.message || 'Error al responder' });
     }
-    const state = loadState();
-    if (!state.answered.includes(id)) state.answered.push(id);
-    saveState(state);
+    await markAnswered(id, commentText || '', text);
     res.json({ ok: true });
   } catch (e) {
     console.error('fb reply error:', e.message);
@@ -320,30 +347,27 @@ app.post('/webhook/facebook-make', (req, res) => {
   res.header('Access-Control-Allow-Origin', '*');
   const c = req.body;
   if (!c || !c.id) return res.status(400).json({ error: 'Datos invalidos' });
-  const state = loadState();
-  if (!state.discarded.includes(c.id)) {
-    const exists = makeComments.find(x => x.id === c.id);
-    if (!exists) {
-      makeComments.push({
-        id: c.id,
-        text: c.text || '',
-        author: c.author || 'Usuario',
-        authorId: c.authorId || '',
-        postId: c.postId || '',
-        publishedAt: c.publishedAt || new Date().toISOString(),
-        network: 'fb'
-      });
-    }
+  const exists = makeComments.find(x => x.id === c.id);
+  if (!exists) {
+    makeComments.push({
+      id: c.id, text: c.text || '', author: c.author || 'Usuario',
+      authorId: c.authorId || '', postId: c.postId || '',
+      publishedAt: c.publishedAt || new Date().toISOString(), network: 'fb'
+    });
   }
   res.json({ ok: true });
 });
 
-app.get('/fb/make-comments', (req, res) => {
-  const state = loadState();
-  const filtered = makeComments
-    .filter(c => !state.discarded.includes(c.id))
-    .map(c => ({ ...c, answered: state.answered.includes(c.id) }));
-  res.json({ comments: filtered });
+app.get('/fb/make-comments', async (req, res) => {
+  try {
+    const state = await getState();
+    const filtered = makeComments
+      .filter(c => !state.discarded.includes(c.id))
+      .map(c => ({ ...c, answered: state.answered.includes(c.id) }));
+    res.json({ comments: filtered });
+  } catch(e) {
+    res.json({ comments: [] });
+  }
 });
 
 // ─── Facebook Webhook verificacion ───────────────────────────────────────────
@@ -352,7 +376,6 @@ app.get('/webhook/facebook', (req, res) => {
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
   if (mode === 'subscribe' && token === 'sudaca2024') {
-    console.log('Facebook webhook verificado');
     res.status(200).send(challenge);
   } else {
     res.status(403).send('Forbidden');
@@ -360,7 +383,6 @@ app.get('/webhook/facebook', (req, res) => {
 });
 
 app.post('/webhook/facebook', (req, res) => {
-  console.log('FB webhook event:', JSON.stringify(req.body));
   res.status(200).send('EVENT_RECEIVED');
 });
 
@@ -370,68 +392,46 @@ function randomInt(min, max) {
 }
 
 app.post('/suggest-reply', async (req, res) => {
-  const { comment } = req.body;
+  const { comment, commentText } = req.body;
   if (!comment) return res.status(400).json({ error: 'Falta el comentario' });
 
   const apiKey = (process.env.ANTHROPIC_API_KEY || '').trim();
   const seed = randomInt(1, 999);
 
-  const prompt = `Sos el asistente de respuestas de comentarios de Javi (Javier Romero), joyero argentino creador del canal Joyeria Sudaca. Tu tarea es sugerir respuestas a comentarios de sus redes sociales imitando su voz y estilo exactos.
+  // Traer ejemplos reales de respuestas anteriores
+  let ejemplos = '';
+  try {
+    const examples = await getExamples(15);
+    if (examples.length > 0) {
+      ejemplos = '\n\nEJEMPLOS REALES DE COMO RESPONDE JAVI (usar como referencia principal):\n';
+      examples.forEach((ex, i) => {
+        ejemplos += `\nEjemplo ${i+1}:\nComentario: "${ex.comment_text}"\nRespuesta de Javi: "${ex.reply_text}"\n`;
+      });
+      ejemplos += '\nUsar estos ejemplos como guia principal de estilo, tono y longitud.\n';
+    }
+  } catch(e) {}
+
+  const prompt = `Sos el asistente de respuestas de comentarios de Javi (Javier Romero), joyero argentino creador del canal Joyeria Sudaca. Tu tarea es sugerir UNA SOLA respuesta lista para publicar, imitando exactamente su voz y estilo.${ejemplos}
 
 ESTILO GENERAL
 - Respuestas cortas y directas, sin relleno
-- Sin malas palabras en ningun caso
-- La palabra "che" usarla muy poco, no como muletilla
+- Sin malas palabras
+- La palabra "che" usarla muy poco
 - Rioplatense casual: "bro", "papa", "mala mia", "abrazo"
 - Nunca explicar chistes ni extenderse de mas
-- Elegir UNA sola opcion — usar el numero ${seed} para decidir cual, no elegir siempre la misma
-- No inventar informacion tecnica que no se sabe con certeza
-- La marca se escribe siempre "Sudaca" con C, nunca con K
+- Usar el numero ${seed} para elegir variacion, no repetir siempre la misma
+- No inventar informacion tecnica
+- La marca se escribe "Sudaca" con C
 
 REGLAS DE EMOJIS
-- Los emojis se usan con criterio, no automaticamente
-- Agradecimientos calidos, bancada, humor compartido pueden llevar emoji
-- Informacion tecnica, cuestionamientos, respuestas neutras sin emoji
-- Nunca reirse si el comentario no es gracioso
-- Si el comentario es solo emojis responder solo con emojis, sin texto
+- Usarlos con criterio, no automaticamente
+- Agradecimientos calidos y humor pueden llevar emoji
+- Informacion tecnica sin emoji
+- Si el comentario es solo emojis, responder solo con emojis
 
 IDENTIDAD
-- Javi se llama Javier, no es conocido como "el yeti"
-- La gente lo compara con el yeti de Bruta Cocina por parecido fisico
+- Javi es joyero, no "el yeti" (lo comparan con el yeti de Bruta Cocina)
 - El yeti de Bruta Cocina es primo del Dibu Martinez
-- Habla con Z en algunas palabras y la gente lo carga con eso
-
-CATEGORIAS
-1. Elogios: "muchas gracias por el aguante bro" / "gracias bro, me alegro que te guste" / "abrazo bro 🤘" / "no te vas a arrepentir 💪"
-2. Saludos otros paises: "me alegro que te guste, gracias por el apoyo, abrazo grande 🙌" / "abrazo grande para alla 🙌"
-3. Rentabilidad chatarra: "tienen metal pero no es rentable extraerlo a pequeña escala" / "tiene metal pero la cantidad no justifica el proceso"
-4. Compras/envios: "hola! si enviamos a todo el mundo, escribime por Instagram 📦"
-5. Nombres propios/humor: "el proceso esta explicado en un long de este canal" / "si queres info tengo un curso, link en bio"
-6. Por que refinar: "si solo fundo no se que calidad tiene el metal, refinando garantizo la pureza" / "como joyero tengo que saber que vendo"
-7. Pepetools: "es de Pepetools! usa el cupon vanallen, tenes 10% off 🔧" / Otro equipo: "se consigue en casas de insumos para joyeros"
-8. Yeti/hibrido: "eso dicen" / "asi parece" / "vos decis?" / "no, soy primo del Dibu 🧌"
-9. Bruta Cocina: "podriamos ser una franquicia 😄" / "podriamos ser una sucursal 😄"
-10. Datos tecnicos: "mala mia, no lo medi desde el arranque" / "la verdad ya no me acuerdo 😅"
-11. Audio: "solo los grossos podemos 🎙️" / "no es para todos 🎙️" / "privilegio de pocos 🎙️"
-12. Residuos: "se almacenan, neutralizan y los retira una empresa para que no contaminen"
-13. Trolls: "meh" / "bah"
-14. Estudiantes: "que bueno! linda carrera, a no bajar los brazos 💪"
-15. Halago pieza: "me alegro que te guste, muchas gracias" / "gracias, fue hecha con mucho cuidado"
-16. Bancada Sudaca: "todos somos joyeria sudaca 🤘"
-17. Ofrecen material: "hola, como estas! escribime por privado de Instagram 📩"
-18. No se entiende: "como?"
-19. Fundio algo sentimental: "habia que seguir trabajando y necesitaba el metal 🤷"
-20. Bendiciones/amen: "amen 🙏" / "bendiciones 🙏"
-21. Solo emojis: responder solo con emojis
-22. Tono simpatico sin contexto: "y si, el oficio es asi" / "puede pasar" / "parte del trabajo"
-23. Corrigen ortografia Sudaca: "yo lo escribo con c 😄"
-24. Si algo se puede fundir: "si, se puede fundir y hacer un lingote"
-25. Breaking Bad/Heisenberg: "jaja algo escuche 😂" / "el nombre me suena 😂"
-26. Acusan de plagio: "yo hablo asi, no me copio de nadie" / "siempre hable asi"
-27. Cuestionan diseño: "el joyero soy yo, la puse asi a proposito 😄" / "asi la pidio el cliente 🙌"
-28. No era mas facil fundirlas: "si solo fundo no se que calidad tiene el metal, refinando garantizo la pureza" / "como joyero tengo que saber que vendo y si simplente lo fundo no se la calidad del metal"
-29. Vendes: "Si vendo contactame por mensaje privado de instagram por favor 🙌"
-30. Tenes tienda? / haces envio?: "Si tengo tienda y hago envios a todo el mundo, link en mi perfil"
 
 INSTRUCCION: Da UNA SOLA respuesta lista para publicar, sin comillas ni explicaciones.
 
@@ -453,16 +453,18 @@ Comentario: ${comment}`;
     });
     const data = await response.json();
     if (!response.ok) {
-      console.error('Anthropic error:', JSON.stringify(data));
       return res.status(500).json({ error: data.error?.message || 'Error de API' });
     }
     res.json({ suggestion: data.content?.[0]?.text || '' });
   } catch (e) {
-    console.error('suggest-reply error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
-
+initDB().then(() => {
+  app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
+}).catch(e => {
+  console.error('Error iniciando DB:', e.message);
+  app.listen(PORT, () => console.log(`Servidor corriendo sin DB en puerto ${PORT}`));
+});
