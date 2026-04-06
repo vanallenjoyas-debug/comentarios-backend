@@ -1,4 +1,4 @@
-// v8
+// v9
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -6,7 +6,21 @@ const session = require('express-session');
 const { Pool } = require('pg');
 
 const app = express();
-app.use(express.json());
+
+app.use((req, res, next) => {
+  let data = '';
+  req.setEncoding('utf8');
+  req.on('data', chunk => { data += chunk; });
+  req.on('end', () => {
+    try {
+      req.body = data ? JSON.parse(data.replace(/[\x00-\x1F\x7F]/g, ' ')) : {};
+    } catch(e) {
+      req.body = {};
+    }
+    next();
+  });
+});
+
 app.use(cors({
   origin: [
     'https://storied-squirrel-fb5eea.netlify.app',
@@ -400,7 +414,6 @@ app.post('/suggest-reply', async (req, res) => {
   const apiKey = (process.env.ANTHROPIC_API_KEY || '').trim();
   const seed = randomInt(1, 999);
 
-  // Traer ejemplos reales de respuestas anteriores
   let ejemplos = '';
   try {
     const examples = await getExamples(15);
