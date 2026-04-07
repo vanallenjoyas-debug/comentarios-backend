@@ -1,4 +1,4 @@
-// v9
+// v10
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -37,7 +37,6 @@ app.use(session({
   cookie: { secure: process.env.NODE_ENV === 'production', maxAge: 7 * 24 * 60 * 60 * 1000 }
 }));
 
-// ─── PostgreSQL ───────────────────────────────────────────────────────────────
 console.log("DB URL:", process.env.PG_URL || process.env.DATABASE_URL || "NO URL FOUND");
 const pool = new Pool({ connectionString: process.env.PG_URL });
 
@@ -87,7 +86,6 @@ async function getExamples(limit = 20) {
   return res.rows;
 }
 
-// ─── YouTube Auth ─────────────────────────────────────────────────────────────
 const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_CLIENT_ID,
   process.env.GOOGLE_CLIENT_SECRET,
@@ -150,7 +148,6 @@ function requireAuth(req, res, next) {
   next();
 }
 
-// ─── Estado endpoints ─────────────────────────────────────────────────────────
 app.get('/state', async (req, res) => {
   try { res.json(await getState()); }
   catch(e) { res.json({ answered: [], discarded: [] }); }
@@ -170,7 +167,6 @@ app.post('/state/discarded', async (req, res) => {
   catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── YouTube Endpoints ────────────────────────────────────────────────────────
 const MY_CHANNEL_ID = 'UCsGYMvcMeUCxXIx--A7SU6w';
 
 app.get('/comments', requireAuth, async (req, res) => {
@@ -234,7 +230,6 @@ app.get('/video/:id', requireAuth, async (req, res) => {
   }
 });
 
-// ─── Videos del canal ─────────────────────────────────────────────────────────
 app.get('/channel/videos', requireAuth, async (req, res) => {
   try {
     const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
@@ -296,14 +291,13 @@ app.get('/video/:id/comments', requireAuth, async (req, res) => {
   }
 });
 
-// ─── Facebook Endpoints ───────────────────────────────────────────────────────
 const FB_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
 const FB_PAGE_ID = process.env.FB_PAGE_ID;
 
 app.get('/fb/comments', async (req, res) => {
   try {
     const { after } = req.query;
-    let url = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/feed?fields=id,message,created_time,comments{id,message,from,created_time}&limit=10&access_token=${FB_TOKEN}`;
+    let url = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time,comments{id,message,from,created_time}&limit=10&access_token=${FB_TOKEN}`;
     if (after) url += `&after=${after}`;
     const r = await fetch(url);
     const data = await r.json();
@@ -356,7 +350,6 @@ app.post('/fb/comments/:id/reply', async (req, res) => {
   }
 });
 
-// ─── Make.com Facebook webhook ────────────────────────────────────────────────
 const makeComments = [];
 
 app.post('/webhook/facebook-make', (req, res) => {
@@ -386,7 +379,6 @@ app.get('/fb/make-comments', async (req, res) => {
   }
 });
 
-// ─── Facebook Webhook verificacion ───────────────────────────────────────────
 app.get('/webhook/facebook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -402,7 +394,6 @@ app.post('/webhook/facebook', (req, res) => {
   res.status(200).send('EVENT_RECEIVED');
 });
 
-// ─── IA Sugerencias ───────────────────────────────────────────────────────────
 function randomInt(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
