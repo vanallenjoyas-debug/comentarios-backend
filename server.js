@@ -298,7 +298,7 @@ app.get('/fb/comments', async (req, res) => {
   try {
     const { after } = req.query;
     // Pedimos replies de cada comentario para filtrar los ya respondidos por la pagina
-    let url = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time,comments{id,message,from,created_time,comments{id,from}}&limit=10&access_token=${FB_TOKEN}`;
+    let url = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time,comments{id,message,from,created_time,comments{id,from}}&limit=25&access_token=${FB_TOKEN}`;
     if (after) url += `&after=${after}`;
     const r = await fetch(url);
     const data = await r.json();
