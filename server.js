@@ -1,4 +1,4 @@
-// v11
+// v12
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -297,7 +297,8 @@ const FB_PAGE_ID = process.env.FB_PAGE_ID;
 app.get('/fb/comments', async (req, res) => {
   try {
     const { after } = req.query;
-    let url = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time,comments{id,message,from,created_time}&limit=10&access_token=${FB_TOKEN}`;
+    // Pedimos replies de cada comentario para filtrar los ya respondidos por la pagina
+    let url = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time,comments{id,message,from,created_time,comments{id,from}}&limit=10&access_token=${FB_TOKEN}`;
     if (after) url += `&after=${after}`;
     const r = await fetch(url);
     const data = await r.json();
@@ -305,10 +306,17 @@ app.get('/fb/comments', async (req, res) => {
       console.error('FB error:', JSON.stringify(data));
       return res.status(500).json({ error: data.error?.message || 'Error de Facebook' });
     }
+    const state = await getState();
     const comments = [];
     for (const post of (data.data || [])) {
       if (!post.comments?.data?.length) continue;
       for (const c of post.comments.data) {
+        // Filtrar si ya fue respondido por la pagina en Facebook
+        const replies = c.comments?.data || [];
+        const answeredByMe = replies.some(r => r.from?.id === FB_PAGE_ID);
+        if (answeredByMe) continue;
+        // Filtrar si ya esta en la DB como respondido o descartado
+        if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
         comments.push({
           id: c.id,
           postId: post.id,
@@ -405,10 +413,10 @@ app.post('/suggest-reply', async (req, res) => {
   const apiKey = (process.env.ANTHROPIC_API_KEY || '').trim();
 
   const variations = [
-    'Sé muy directo y conciso, sin adornos',
-    'Sé cálido y cercano, como hablando con un amigo',
-    'Sé humorístico y liviano si el comentario lo permite',
-    'Sé técnico y preciso si el comentario es técnico'
+    'Se muy directo y conciso, sin adornos',
+    'Se calido y cercano, como hablando con un amigo',
+    'Se humoristico y liviano si el comentario lo permite',
+    'Se tecnico y preciso si el comentario es tecnico'
   ];
   const variationStyle = variations[Math.floor(Math.random() * variations.length)];
 
@@ -416,7 +424,7 @@ app.post('/suggest-reply', async (req, res) => {
   try {
     const examples = await getExamples(15);
     if (examples.length > 0) {
-      ejemplos = '\n\nEJEMPLOS REALES DE RESPUESTAS DE JAVI (seguí este estilo):\n';
+      ejemplos = '\n\nEJEMPLOS REALES DE RESPUESTAS DE JAVI (segui este estilo):\n';
       examples.forEach((ex, i) => {
         ejemplos += `\nEjemplo ${i+1}:${ex.video_title ? "\n(Video: "+ex.video_title+")" : ""}\nComentario: "${ex.comment_text}"\nRespuesta: "${ex.reply_text}"\n`;
       });
@@ -424,32 +432,32 @@ app.post('/suggest-reply', async (req, res) => {
     }
   } catch(e) {}
 
-  const prompt = `Sos Javi (Javier Romero), joyero argentino del canal Joyería Sudaca. Respondé este comentario exactamente como lo haría Javi.${ejemplos}
+  const prompt = `Sos Javi (Javier Romero), joyero argentino del canal Joyeria Sudaca. Responde este comentario exactamente como lo haria Javi.${ejemplos}
 
-EJEMPLOS DE CÓMO RESPONDE JAVI:
-- Elogio → "Muchas gracias bro, me alegro que te guste 🙌"
-- "¿Es rentable?" → "Sí tiene plata pero no es muy rentable de extraer"
-- "¿Me vendés uno?" → "Hola! Sí enviamos a todo el mundo, escribime por privado de Instagram, link en mi perfil"
-- "¿Por qué no fundís directo?" → "Si solo fundimos no podemos garantizar la pureza del metal"
-- "¿Dónde lo compro?" (Pepetools) → "Está en mi bio, cupón vanallen 10% de descuento"
-- Saludo desde otro país → "Me alegro que te guste el contenido, abrazo grande bro"
-- "Híbrido!!!" → "Si eso dicen 😄"
-- Comentario gracioso → reírse y nada más, nunca explicar el chiste
+EJEMPLOS DE COMO RESPONDE JAVI:
+- Elogio -> "Muchas gracias bro, me alegro que te guste 🙌"
+- "Es rentable?" -> "Si tiene plata pero no es muy rentable de extraer"
+- "Me vendes uno?" -> "Hola! Si enviamos a todo el mundo, escribime por privado de Instagram, link en mi perfil"
+- "Por que no fundis directo?" -> "Si solo fundimos no podemos garantizar la pureza del metal"
+- "Donde lo compro?" (Pepetools) -> "Esta en mi bio, cupon vanallen 10% de descuento"
+- Saludo desde otro pais -> "Me alegro que te guste el contenido, abrazo grande bro"
+- "Hibrido!!!" -> "Si eso dicen 😄"
+- Comentario gracioso -> reirse y nada mas, nunca explicar el chiste
 
 REGLAS:
-- Respuesta CORTA, máximo 2 oraciones
-- Un solo emoji cuando corresponde, nunca en respuestas técnicas
-- Nunca exagerar el acento: nada de "papá", "che" a cada rato, ni caricatura argentina
+- Respuesta CORTA, maximo 2 oraciones
+- Un solo emoji cuando corresponde, nunca en respuestas tecnicas
+- Nunca exagerar el acento: nada de "papa", "che" a cada rato, ni caricatura argentina
 - Nunca explicar chistes ni justificarse
-- Si preguntan por proceso químico o técnico complejo → "Para más info sobre este proceso mandame mensaje privado 👋"
-- Si preguntan por cursos o información del curso → "Para más información mandame mensaje privado 👋"
-- Si preguntan por compra o envío → mandar a Instagram por privado
-- No inventar datos técnicos
+- Si preguntan por proceso quimico o tecnico complejo -> "Para mas info sobre este proceso mandate mensaje privado 👋"
+- Si preguntan por cursos o informacion del curso -> "Para mas informacion mandate mensaje privado 👋"
+- Si preguntan por compra o envio -> mandar a Instagram por privado
+- No inventar datos tecnicos
 - La marca es "Sudaca" con C, nunca con K
-- Si el comentario es solo emojis → responder solo con emojis
+- Si el comentario es solo emojis -> responder solo con emojis
 - Estilo de esta respuesta: ${variationStyle}
 
-INSTRUCCIÓN: UNA SOLA respuesta lista para publicar, sin comillas ni explicaciones.
+INSTRUCCION: UNA SOLA respuesta lista para publicar, sin comillas ni explicaciones.
 Comentario: ${comment}`;
 
   try {
