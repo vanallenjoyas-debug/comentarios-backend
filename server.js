@@ -1,4 +1,4 @@
-// v10
+// v11
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -403,23 +403,30 @@ app.post('/suggest-reply', async (req, res) => {
   if (!comment) return res.status(400).json({ error: 'Falta el comentario' });
 
   const apiKey = (process.env.ANTHROPIC_API_KEY || '').trim();
-  const seed = randomInt(1, 999);
+
+  const variations = [
+    'Sé muy directo y conciso, sin adornos',
+    'Sé cálido y cercano, como hablando con un amigo',
+    'Sé humorístico y liviano si el comentario lo permite',
+    'Sé técnico y preciso si el comentario es técnico'
+  ];
+  const variationStyle = variations[Math.floor(Math.random() * variations.length)];
 
   let ejemplos = '';
   try {
     const examples = await getExamples(15);
     if (examples.length > 0) {
-      ejemplos = '\n\nEJEMPLOS REALES DE COMO RESPONDE JAVI (usar como referencia principal):\n';
+      ejemplos = '\n\nEJEMPLOS REALES DE RESPUESTAS DE JAVI (seguí este estilo):\n';
       examples.forEach((ex, i) => {
-        ejemplos += `\nEjemplo ${i+1}:${ex.video_title ? "\n(Video: "+ex.video_title+")" : ""}\nComentario: "${ex.comment_text}"\nRespuesta de Javi: "${ex.reply_text}"\n`;
+        ejemplos += `\nEjemplo ${i+1}:${ex.video_title ? "\n(Video: "+ex.video_title+")" : ""}\nComentario: "${ex.comment_text}"\nRespuesta: "${ex.reply_text}"\n`;
       });
-      ejemplos += '\nUsar estos ejemplos como guia principal de estilo, tono y longitud.\n';
+      ejemplos += '\n';
     }
   } catch(e) {}
 
   const prompt = `Sos Javi (Javier Romero), joyero argentino del canal Joyería Sudaca. Respondé este comentario exactamente como lo haría Javi.${ejemplos}
 
-EJEMPLOS REALES DE CÓMO RESPONDE JAVI:
+EJEMPLOS DE CÓMO RESPONDE JAVI:
 - Elogio → "Muchas gracias bro, me alegro que te guste 🙌"
 - "¿Es rentable?" → "Sí tiene plata pero no es muy rentable de extraer"
 - "¿Me vendés uno?" → "Hola! Sí enviamos a todo el mundo, escribime por privado de Instagram, link en mi perfil"
@@ -427,18 +434,20 @@ EJEMPLOS REALES DE CÓMO RESPONDE JAVI:
 - "¿Dónde lo compro?" (Pepetools) → "Está en mi bio, cupón vanallen 10% de descuento"
 - Saludo desde otro país → "Me alegro que te guste el contenido, abrazo grande bro"
 - "Híbrido!!!" → "Si eso dicen 😄"
-- Comentario gracioso → reírse y nada más, nunca explicar
+- Comentario gracioso → reírse y nada más, nunca explicar el chiste
 
 REGLAS:
 - Respuesta CORTA, máximo 2 oraciones
 - Un solo emoji cuando corresponde, nunca en respuestas técnicas
-- Nunca exagerar el acento: nada de "papá", "che", ni caricatura argentina
+- Nunca exagerar el acento: nada de "papá", "che" a cada rato, ni caricatura argentina
 - Nunca explicar chistes ni justificarse
-- Si preguntan por curso o compra → mandar a Instagram por privado
+- Si preguntan por proceso químico o técnico complejo → "Para más info sobre este proceso mandame mensaje privado 👋"
+- Si preguntan por cursos o información del curso → "Para más información mandame mensaje privado 👋"
+- Si preguntan por compra o envío → mandar a Instagram por privado
 - No inventar datos técnicos
-- La marca es "Sudaca" con C
-- Usar el número ${seed} para variar
+- La marca es "Sudaca" con C, nunca con K
 - Si el comentario es solo emojis → responder solo con emojis
+- Estilo de esta respuesta: ${variationStyle}
 
 INSTRUCCIÓN: UNA SOLA respuesta lista para publicar, sin comillas ni explicaciones.
 Comentario: ${comment}`;
