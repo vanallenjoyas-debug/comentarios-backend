@@ -314,7 +314,7 @@ async function fetchAllPostComments(postId, token, pageId) {
 app.get('/fb/comments', async (req, res) => {
   try {
     const { after } = req.query;
-    let url = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time&limit=25&access_token=${FB_TOKEN}`;
+    let url = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time&limit=3&access_token=${FB_TOKEN}`;
     if (after) url += `&after=${after}`;
     const r = await fetch(url);
     const data = await r.json();
