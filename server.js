@@ -311,10 +311,13 @@ app.get('/fb/comments', async (req, res) => {
     for (const post of (data.data || [])) {
       if (!post.comments?.data?.length) continue;
       for (const c of post.comments.data) {
-        // Filtrar si ya fue respondido por la pagina en Facebook
-        const replies = c.comments?.data || [];
-        const answeredByMe = replies.some(r => r.from?.id === FB_PAGE_ID);
-        if (answeredByMe) continue;
+  // Filtrar comentarios propios de la página
+  if (c.from?.id === FB_PAGE_ID) continue;
+  
+  // Filtrar si ya fue respondido por la pagina en Facebook
+  const replies = c.comments?.data || [];
+  const answeredByMe = replies.some(r => r.from?.id === FB_PAGE_ID);
+  if (answeredByMe) continue;
         // Filtrar si ya esta en la DB como respondido o descartado
         if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
         comments.push({
