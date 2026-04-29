@@ -311,7 +311,7 @@ app.get('/fb/comments', async (req, res) => {
     for (const post of (data.data || [])) {
       if (!post.comments?.data?.length) continue;
       for (const c of post.comments.data) {
-        if (String(c.from?.id) === String(FB_PAGE_ID)) continue;
+        // if (String(c.from?.id) === String(FB_PAGE_ID)) continue;
   // Filtrar si ya fue respondido por la pagina en Facebook
   const replies = c.comments?.data || [];
         const answeredByMe = replies.some(r => String(r.from?.id) === String(FB_PAGE_ID));
