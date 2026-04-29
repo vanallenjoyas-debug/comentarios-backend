@@ -292,7 +292,7 @@ app.get('/video/:id/comments', requireAuth, async (req, res) => {
 });
 
 const FB_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
-const FB_PAGE_ID = process.env.FB_PAGE_ID;
+const FB_PAGE_ID = (process.env.FB_PAGE_ID || '').trim();
 
 app.get('/fb/comments', async (req, res) => {
   try {
