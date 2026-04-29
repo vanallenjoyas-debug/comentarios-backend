@@ -51,7 +51,7 @@ async function initDB() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
-  console.log('DB lista');
+  console.log('DB lista - VERSION CON FILTRO FB - ' + new Date().toISOString());
 }
 
 async function getState() {
