@@ -1,4 +1,4 @@
-// v14
+// server-yt.js - Solo YouTube
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -14,9 +14,7 @@ app.use((req, res, next) => {
   req.on('end', () => {
     try {
       req.body = data ? JSON.parse(data.replace(/[\x00-\x1F\x7F]/g, ' ')) : {};
-    } catch(e) {
-      req.body = {};
-    }
+    } catch(e) { req.body = {}; }
     next();
   });
 });
@@ -37,7 +35,7 @@ app.use(session({
   cookie: { secure: process.env.NODE_ENV === 'production', maxAge: 7 * 24 * 60 * 60 * 1000 }
 }));
 
-console.log("DB URL:", process.env.PG_URL || process.env.DATABASE_URL || "NO URL FOUND");
+console.log("DB URL:", process.env.PG_URL || "NO URL FOUND");
 const pool = new Pool({ connectionString: process.env.PG_URL });
 
 async function initDB() {
@@ -293,129 +291,10 @@ app.get('/video/:id/comments', requireAuth, async (req, res) => {
   }
 });
 
-const FB_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
-const FB_PAGE_ID = process.env.FB_PAGE_ID;
-
-app.get('/fb/comments', async (req, res) => {
-  try {
-    const { after } = req.query;
-    // Pedimos replies de cada comentario para filtrar los ya respondidos por la pagina
-    let url = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time,comments{id,message,from,created_time,comments{id,from}}&limit=25&access_token=${FB_TOKEN}`;
-    if (after) url += `&after=${after}`;
-    const r = await fetch(url);
-    const data = await r.json();
-    if (!r.ok) {
-      console.error('FB error:', JSON.stringify(data));
-      return res.status(500).json({ error: data.error?.message || 'Error de Facebook' });
-    }
-    const state = await getState();
-    const comments = [];
-    for (const post of (data.data || [])) {
-      if (!post.comments?.data?.length) continue;
-      for (const c of post.comments.data) {
-        // Filtrar comentarios propios y vacios
-        if (!c.message || !c.message.trim() || c.from?.name === 'Javier.vanallen') continue;
-        // Saltar si ya fue respondido por la pagina (tiene replies de la pagina)
-        const replies = c.comments?.data || [];
-        const answeredByPage = replies.some(r => String(r.from?.id) === String(FB_PAGE_ID));
-        if (answeredByPage) continue;
-        // Saltar si ya esta en la DB como respondido o descartado
-        if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
-        comments.push({
-          id: c.id,
-          postId: post.id,
-          postMessage: post.message || '',
-          text: c.message,
-          author: c.from?.name || 'Usuario',
-          authorPhoto: `https://graph.facebook.com/${c.from?.id}/picture?type=square`,
-          publishedAt: c.created_time,
-          network: 'fb'
-        });
-      }
-    }
-    res.json({ comments, nextCursor: data.paging?.cursors?.after || null });
-  } catch (e) {
-    console.error('fb/comments error:', e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/fb/comments/:id/reply', async (req, res) => {
-  const { id } = req.params;
-  const { text, commentText } = req.body;
-  try {
-    const r = await fetch(`https://graph.facebook.com/v19.0/${id}/comments`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ message: text, access_token: FB_TOKEN })
-    });
-    const data = await r.json();
-    if (!r.ok) {
-      console.error('FB reply error:', JSON.stringify(data));
-      return res.status(500).json({ error: data.error?.message || 'Error al responder' });
-    }
-    await markAnswered(id, commentText || '', text, req.body.videoTitle || '');
-    res.json({ ok: true });
-  } catch (e) {
-    console.error('fb reply error:', e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-const makeComments = [];
-
-app.post('/webhook/facebook-make', (req, res) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  const c = req.body;
-  if (!c || !c.id) return res.status(400).json({ error: 'Datos invalidos' });
-  const exists = makeComments.find(x => x.id === c.id);
-  if (!exists) {
-    makeComments.push({
-      id: c.id, text: c.text || '', author: c.author || 'Usuario',
-      authorId: c.authorId || '', postId: c.postId || '',
-      publishedAt: c.publishedAt || new Date().toISOString(), network: 'fb'
-    });
-  }
-  res.json({ ok: true });
-});
-
-app.get('/fb/make-comments', async (req, res) => {
-  try {
-    const state = await getState();
-    const filtered = makeComments
-      .filter(c => !state.discarded.includes(c.id))
-      .map(c => ({ ...c, answered: state.answered.includes(c.id) }));
-    res.json({ comments: filtered });
-  } catch(e) {
-    res.json({ comments: [] });
-  }
-});
-
-app.get('/webhook/facebook', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-  if (mode === 'subscribe' && token === 'sudaca2024') {
-    res.status(200).send(challenge);
-  } else {
-    res.status(403).send('Forbidden');
-  }
-});
-
-app.post('/webhook/facebook', (req, res) => {
-  res.status(200).send('EVENT_RECEIVED');
-});
-
-function randomInt(min, max) {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
-}
-
 app.post('/suggest-reply', async (req, res) => {
-  const { comment, commentText } = req.body;
+  const { comment } = req.body;
   if (!comment) return res.status(400).json({ error: 'Falta el comentario' });
-
   const apiKey = (process.env.ANTHROPIC_API_KEY || '').trim();
-
   const variations = [
     'Se muy directo y conciso, sin adornos',
     'Se calido y cercano, como hablando con un amigo',
@@ -423,7 +302,6 @@ app.post('/suggest-reply', async (req, res) => {
     'Se tecnico y preciso si el comentario es tecnico'
   ];
   const variationStyle = variations[Math.floor(Math.random() * variations.length)];
-
   let ejemplos = '';
   try {
     const examples = await getExamples(15);
@@ -435,7 +313,6 @@ app.post('/suggest-reply', async (req, res) => {
       ejemplos += '\n';
     }
   } catch(e) {}
-
   const prompt = `Sos Javi (Javier Romero), joyero argentino del canal Joyeria Sudaca. Responde este comentario exactamente como lo haria Javi.${ejemplos}
 
 EJEMPLOS DE COMO RESPONDE JAVI:
@@ -453,9 +330,9 @@ REGLAS:
 - Un solo emoji cuando corresponde, nunca en respuestas tecnicas
 - Nunca exagerar el acento: nada de "papa", "che" a cada rato, ni caricatura argentina
 - Nunca explicar chistes ni justificarse
-- Si preguntan por proceso quimico o tecnico complejo -> usa una de estas variaciones: "Para mas info escribime por privado 👋" / "Mandame un mensaje privado y te cuento 👋" / "Por privado te paso mas detalles 🙌" / "Escribime por privado que te explico mejor"
-- Si preguntan por cursos o informacion del curso -> usa una de estas variaciones: "Mandame mensaje privado y te paso toda la info 👋" / "Por privado te mando los detalles 🙌" / "Escribime por privado bro 👋" / "Mandame un privado y te cuento todo"
-- Si preguntan por compra o envio -> mandar por privado a Instagram con variaciones
+- Si preguntan por proceso quimico o tecnico complejo -> "Para mas info escribime por privado 👋"
+- Si preguntan por cursos -> "Mandame mensaje privado y te paso toda la info 👋"
+- Si preguntan por compra o envio -> mandar por privado a Instagram
 - IMPORTANTE: nunca escribir "mandate", siempre "mandame"
 - No inventar datos tecnicos
 - La marca es "Sudaca" con C, nunca con K
@@ -464,40 +341,26 @@ REGLAS:
 
 INSTRUCCION: UNA SOLA respuesta lista para publicar, sin comillas ni explicaciones.
 Comentario: ${comment}`;
-
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 150,
-        messages: [{ role: 'user', content: prompt }]
-      })
+      headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 150, messages: [{ role: 'user', content: prompt }] })
     });
     const data = await response.json();
-    if (!response.ok) {
-      return res.status(500).json({ error: data.error?.message || 'Error de API' });
-    }
+    if (!response.ok) return res.status(500).json({ error: data.error?.message || 'Error de API' });
     res.json({ suggestion: data.content?.[0]?.text || '' });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// Info de version
-app.get('/version', (req, res) => {
-  res.json({ version: 'v14', server: 'comentarios-backend' });
-});
+app.get('/version', (req, res) => res.json({ version: 'server-yt-v1' }));
 
 const PORT = process.env.PORT || 3000;
 initDB().then(() => {
-  app.listen(PORT, () => console.log(`Servidor v14 corriendo en puerto ${PORT}`));
+  app.listen(PORT, () => console.log(`server-yt corriendo en puerto ${PORT}`));
 }).catch(e => {
   console.error('Error iniciando DB:', e.message);
-  app.listen(PORT, () => console.log(`Servidor v14 sin DB en puerto ${PORT}`));
+  app.listen(PORT, () => console.log(`server-yt sin DB en puerto ${PORT}`));
 });
