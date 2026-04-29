@@ -1,4 +1,4 @@
-// v12
+// v13
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -311,12 +311,13 @@ app.get('/fb/comments', async (req, res) => {
     for (const post of (data.data || [])) {
       if (!post.comments?.data?.length) continue;
       for (const c of post.comments.data) {
-        if (String(c.from?.id) === String(FB_PAGE_ID)) continue;
-  // Filtrar si ya fue respondido por la pagina en Facebook
-  const replies = c.comments?.data || [];
-        const answeredByMe = replies.some(r => String(r.from?.id) === String(FB_PAGE_ID));
-        if (answeredByMe) continue;
-        // Filtrar si ya esta en la DB como respondido o descartado
+        // Saltar comentarios vacíos
+        if (!c.message || !c.message.trim()) continue;
+        // Saltar si ya fue respondido por la pagina (tiene replies de la pagina)
+        const replies = c.comments?.data || [];
+        const answeredByPage = replies.some(r => String(r.from?.id) === String(FB_PAGE_ID));
+        if (answeredByPage) continue;
+        // Saltar si ya esta en la DB como respondido o descartado
         if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
         comments.push({
           id: c.id,
@@ -450,9 +451,9 @@ REGLAS:
 - Un solo emoji cuando corresponde, nunca en respuestas tecnicas
 - Nunca exagerar el acento: nada de "papa", "che" a cada rato, ni caricatura argentina
 - Nunca explicar chistes ni justificarse
-- Si preguntan por proceso quimico o tecnico complejo → respondé con UNA de estas variaciones al azar: "Para más info escribime por privado 👋" / "Mandame un mensaje privado y te cuento 👋" / "Por privado te paso más detalles 🙌" / "Escribime por privado que te explico mejor"
-- Si preguntan por cursos o información del curso → respondé con UNA de estas variaciones al azar: "Mandame mensaje privado y te paso toda la info 👋" / "Por privado te mando los detalles 🙌" / "Escribime por privado bro 👋" / "Mandame un privado y te cuento todo"
-- Si preguntan por compra o envío → igual que arriba, variaciones de mandar por privado a Instagram
+- Si preguntan por proceso quimico o tecnico complejo -> usa una de estas variaciones: "Para mas info escribime por privado 👋" / "Mandame un mensaje privado y te cuento 👋" / "Por privado te paso mas detalles 🙌" / "Escribime por privado que te explico mejor"
+- Si preguntan por cursos o informacion del curso -> usa una de estas variaciones: "Mandame mensaje privado y te paso toda la info 👋" / "Por privado te mando los detalles 🙌" / "Escribime por privado bro 👋" / "Mandame un privado y te cuento todo"
+- Si preguntan por compra o envio -> mandar por privado a Instagram con variaciones
 - IMPORTANTE: nunca escribir "mandate", siempre "mandame"
 - No inventar datos tecnicos
 - La marca es "Sudaca" con C, nunca con K
@@ -486,10 +487,15 @@ Comentario: ${comment}`;
   }
 });
 
+// Info de version
+app.get('/version', (req, res) => {
+  res.json({ version: 'v13', server: 'comentarios-backend' });
+});
+
 const PORT = process.env.PORT || 3000;
 initDB().then(() => {
-  app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
+  app.listen(PORT, () => console.log(`Servidor v13 corriendo en puerto ${PORT}`));
 }).catch(e => {
   console.error('Error iniciando DB:', e.message);
-  app.listen(PORT, () => console.log(`Servidor corriendo sin DB en puerto ${PORT}`));
+  app.listen(PORT, () => console.log(`Servidor v13 sin DB en puerto ${PORT}`));
 });
