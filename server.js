@@ -1,4 +1,4 @@
-// v13
+// v14
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -180,6 +180,7 @@ app.get('/comments', requireAuth, async (req, res) => {
       order: 'time',
       pageToken: pageToken || undefined
     });
+    const state = await getState();
     const comments = response.data.items.map(item => {
       const replies = item.replies?.comments || [];
       const answeredByMe = replies.some(r => r.snippet.authorChannelId?.value === MY_CHANNEL_ID);
@@ -192,9 +193,10 @@ app.get('/comments', requireAuth, async (req, res) => {
         publishedAt: item.snippet.topLevelComment.snippet.publishedAt,
         likeCount: item.snippet.topLevelComment.snippet.likeCount,
         replyCount: item.snippet.totalReplyCount,
-        answeredByMe
+        answeredByMe,
+        answered: answeredByMe || state.answered.includes(item.id)
       };
-    });
+    }).filter(c => !c.answeredByMe && !state.answered.includes(c.id) && !state.discarded.includes(c.id));
     res.json({ comments, nextPageToken: response.data.nextPageToken || null });
   } catch (e) {
     console.error(e);
@@ -311,8 +313,8 @@ app.get('/fb/comments', async (req, res) => {
     for (const post of (data.data || [])) {
       if (!post.comments?.data?.length) continue;
       for (const c of post.comments.data) {
-        // Saltar comentarios vacíos
-        if (!c.message || !c.message.trim()) continue;
+        // Filtrar comentarios propios y vacios
+        if (!c.message || !c.message.trim() || c.from?.name === 'Javier.vanallen') continue;
         // Saltar si ya fue respondido por la pagina (tiene replies de la pagina)
         const replies = c.comments?.data || [];
         const answeredByPage = replies.some(r => String(r.from?.id) === String(FB_PAGE_ID));
@@ -489,13 +491,13 @@ Comentario: ${comment}`;
 
 // Info de version
 app.get('/version', (req, res) => {
-  res.json({ version: 'v13', server: 'comentarios-backend' });
+  res.json({ version: 'v14', server: 'comentarios-backend' });
 });
 
 const PORT = process.env.PORT || 3000;
 initDB().then(() => {
-  app.listen(PORT, () => console.log(`Servidor v13 corriendo en puerto ${PORT}`));
+  app.listen(PORT, () => console.log(`Servidor v14 corriendo en puerto ${PORT}`));
 }).catch(e => {
   console.error('Error iniciando DB:', e.message);
-  app.listen(PORT, () => console.log(`Servidor v13 sin DB en puerto ${PORT}`));
+  app.listen(PORT, () => console.log(`Servidor v14 sin DB en puerto ${PORT}`));
 });
