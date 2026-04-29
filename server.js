@@ -442,7 +442,7 @@ app.post('/suggest-reply', async (req, res) => {
 
   let ejemplos = '';
   try {
-    const examples = await getExamples(15);
+    const examples = await getExamples(50);
     if (examples.length > 0) {
       ejemplos = '\n\nEJEMPLOS REALES DE RESPUESTAS DE JAVI (segui este estilo):\n';
       examples.forEach((ex, i) => {
