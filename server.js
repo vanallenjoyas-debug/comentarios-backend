@@ -1,4 +1,4 @@
-// v13
+// v14
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -51,7 +51,7 @@ async function initDB() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
-  console.log('DB lista - v13 - ' + new Date().toISOString());
+  console.log('DB lista - v14 - ' + new Date().toISOString());
 }
 
 async function getState() {
@@ -211,7 +211,7 @@ app.post('/comments/:id/reply', requireAuth, async (req, res) => {
       part: 'snippet',
       requestBody: { snippet: { parentId: id, textOriginal: text } }
     });
-    if (req.body.userEdited) if (req.body.userEdited) await markAnswered(id, commentText || '', text, req.body.videoTitle || '');
+    if (req.body.userEdited) await markAnswered(id, commentText || '', text, req.body.videoTitle || '');
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
@@ -294,27 +294,10 @@ app.get('/video/:id/comments', requireAuth, async (req, res) => {
 const FB_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
 const FB_PAGE_ID = (process.env.FB_PAGE_ID || '').trim();
 
-// Función para traer todos los comentarios de un post paginando
-async function fetchAllPostComments(postId, token, pageId) {
-  const allComments = [];
-  let url = `https://graph.facebook.com/v19.0/${postId}/comments?fields=id,message,from,created_time,comments{id,from}&limit=20&access_token=${token}`;
-  
-  let pages = 0;
-  while (url && pages < 1) { // max 5 páginas por post = 500 comentarios
-    const r = await fetch(url);
-    const data = await r.json();
-    if (!r.ok || !data.data) break;
-    allComments.push(...data.data);
-    url = data.paging?.next || null;
-    pages++;
-  }
-  return allComments;
-}
-
 app.get('/fb/comments', async (req, res) => {
   try {
     const { after } = req.query;
-    let url = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time&limit=3&access_token=${FB_TOKEN}`;
+    let url = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time,comments.limit(20){id,message,from,created_time,comments{id,from}}&limit=5&access_token=${FB_TOKEN}`;
     if (after) url += `&after=${after}`;
     const r = await fetch(url);
     const data = await r.json();
@@ -326,20 +309,13 @@ app.get('/fb/comments', async (req, res) => {
     const comments = [];
 
     for (const post of (data.data || [])) {
-      const postComments = await fetchAllPostComments(post.id, FB_TOKEN, FB_PAGE_ID);
-      
-      for (const c of postComments) {
-        // Filtrar comentarios propios de la página
+      if (!post.comments?.data?.length) continue;
+      for (const c of post.comments.data) {
         if (c.from?.id === FB_PAGE_ID) continue;
-        
-        // Filtrar si ya fue respondido por la pagina en Facebook
         const replies = c.comments?.data || [];
         const answeredByMe = replies.some(r => r.from?.id === FB_PAGE_ID);
         if (answeredByMe) continue;
-
-        // Filtrar si ya esta en la DB como respondido o descartado
         if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
-
         comments.push({
           id: c.id,
           postId: post.id,
@@ -374,7 +350,7 @@ app.post('/fb/comments/:id/reply', async (req, res) => {
       console.error('FB reply error:', JSON.stringify(data));
       return res.status(500).json({ error: data.error?.message || 'Error al responder' });
     }
-    await markAnswered(id, commentText || '', text, req.body.videoTitle || '');
+    if (req.body.userEdited) await markAnswered(id, commentText || '', text, req.body.videoTitle || '');
     res.json({ ok: true });
   } catch (e) {
     console.error('fb reply error:', e.message);
@@ -471,7 +447,7 @@ REGLAS:
 - Nunca explicar chistes ni justificarse
 - Si preguntan por proceso quimico o tecnico complejo -> elegí AL AZAR una de estas: "Para más info escribime por privado 👋" / "Mandame un mensaje privado y te cuento 👋" / "Por privado te paso más detalles 🙌" / "Escribime por privado que te explico mejor"
 - Si preguntan por cursos o informacion del curso -> elegí AL AZAR una de estas: "Mandame mensaje privado y te paso toda la info 👋" / "Por privado te mando los detalles 🙌" / "Escribime por privado bro 👋" / "Mandame un privado y te cuento todo"
-- Si preguntan por compra o envio -> elegí AL AZAR una de estas: "Mandame un privado en y te ayudo 👋" / "Escribime por privado 🙌" / "Por privado te cuento 👋" / "Mandame mensaje privado por favor bro"
+- Si preguntan por compra o envio -> elegí AL AZAR una de estas: "Mandame un privado en Instagram y te ayudo 👋" / "Escribime por Instagram por privado 🙌" / "Por privado en Instagram te cuento 👋" / "Mandame mensaje en Instagram bro"
 - NUNCA escribir "mandate", siempre "mandame"
 - No inventar datos tecnicos
 - La marca es "Sudaca" con C, nunca con K
