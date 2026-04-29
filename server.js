@@ -1,4 +1,4 @@
-// v12
+// v13
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -51,7 +51,7 @@ async function initDB() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
-  console.log('DB lista - VERSION CON FILTRO FB - ' + new Date().toISOString());
+  console.log('DB lista - v13 - ' + new Date().toISOString());
 }
 
 async function getState() {
@@ -294,11 +294,27 @@ app.get('/video/:id/comments', requireAuth, async (req, res) => {
 const FB_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
 const FB_PAGE_ID = (process.env.FB_PAGE_ID || '').trim();
 
+// Función para traer todos los comentarios de un post paginando
+async function fetchAllPostComments(postId, token, pageId) {
+  const allComments = [];
+  let url = `https://graph.facebook.com/v19.0/${postId}/comments?fields=id,message,from,created_time,comments{id,from}&limit=100&access_token=${token}`;
+  
+  let pages = 0;
+  while (url && pages < 5) { // max 5 páginas por post = 500 comentarios
+    const r = await fetch(url);
+    const data = await r.json();
+    if (!r.ok || !data.data) break;
+    allComments.push(...data.data);
+    url = data.paging?.next || null;
+    pages++;
+  }
+  return allComments;
+}
+
 app.get('/fb/comments', async (req, res) => {
   try {
     const { after } = req.query;
-    // Pedimos replies de cada comentario para filtrar los ya respondidos por la pagina
-    let url = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time,comments{id,message,from,created_time,comments{id,from}}&limit=25&access_token=${FB_TOKEN}`;
+    let url = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time&limit=25&access_token=${FB_TOKEN}`;
     if (after) url += `&after=${after}`;
     const r = await fetch(url);
     const data = await r.json();
@@ -308,19 +324,22 @@ app.get('/fb/comments', async (req, res) => {
     }
     const state = await getState();
     const comments = [];
+
     for (const post of (data.data || [])) {
-      if (!post.comments?.data?.length) continue;
-      for (const c of post.comments.data) {
-  console.log('FROM_ID:', c.from?.id, '| PAGE_ID:', FB_PAGE_ID, '| MSG:', c.message?.substring(0,30));
-  // Filtrar comentarios propios de la página
-  if (c.from?.id === FB_PAGE_ID) continue;
-  
-  // Filtrar si ya fue respondido por la pagina en Facebook
-  const replies = c.comments?.data || [];
-  const answeredByMe = replies.some(r => r.from?.id === FB_PAGE_ID);
-  if (answeredByMe) continue;
+      const postComments = await fetchAllPostComments(post.id, FB_TOKEN, FB_PAGE_ID);
+      
+      for (const c of postComments) {
+        // Filtrar comentarios propios de la página
+        if (c.from?.id === FB_PAGE_ID) continue;
+        
+        // Filtrar si ya fue respondido por la pagina en Facebook
+        const replies = c.comments?.data || [];
+        const answeredByMe = replies.some(r => r.from?.id === FB_PAGE_ID);
+        if (answeredByMe) continue;
+
         // Filtrar si ya esta en la DB como respondido o descartado
         if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
+
         comments.push({
           id: c.id,
           postId: post.id,
@@ -333,6 +352,7 @@ app.get('/fb/comments', async (req, res) => {
         });
       }
     }
+
     res.json({ comments, nextCursor: data.paging?.cursors?.after || null });
   } catch (e) {
     console.error('fb/comments error:', e.message);
@@ -405,10 +425,6 @@ app.get('/webhook/facebook', (req, res) => {
 app.post('/webhook/facebook', (req, res) => {
   res.status(200).send('EVENT_RECEIVED');
 });
-
-function randomInt(min, max) {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
-}
 
 app.post('/suggest-reply', async (req, res) => {
   const { comment, commentText } = req.body;
