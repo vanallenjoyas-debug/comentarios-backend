@@ -311,6 +311,7 @@ app.get('/fb/comments', async (req, res) => {
     for (const post of (data.data || [])) {
       if (!post.comments?.data?.length) continue;
       for (const c of post.comments.data) {
+  console.log('FROM_ID:', c.from?.id, '| PAGE_ID:', FB_PAGE_ID, '| MSG:', c.message?.substring(0,30));
   // Filtrar comentarios propios de la página
   if (c.from?.id === FB_PAGE_ID) continue;
   
