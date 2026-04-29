@@ -211,7 +211,7 @@ app.post('/comments/:id/reply', requireAuth, async (req, res) => {
       part: 'snippet',
       requestBody: { snippet: { parentId: id, textOriginal: text } }
     });
-    await markAnswered(id, commentText || '', text, req.body.videoTitle || '');
+    if (req.body.userEdited) if (req.body.userEdited) await markAnswered(id, commentText || '', text, req.body.videoTitle || '');
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
