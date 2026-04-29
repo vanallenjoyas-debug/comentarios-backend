@@ -279,9 +279,8 @@ app.get('/video/:id/comments', requireAuth, async (req, res) => {
         publishedAt: item.snippet.topLevelComment.snippet.publishedAt,
         likeCount: item.snippet.topLevelComment.snippet.likeCount,
         replyCount: item.snippet.totalReplyCount,
-        answeredByMe,
         answered: answeredByMe || state.answered.includes(item.id),
-        network: 'yt'
+network: 'yt'
       };
     });
     res.json({ comments, nextPageToken: response.data.nextPageToken || null });
