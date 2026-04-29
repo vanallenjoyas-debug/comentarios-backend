@@ -1,4 +1,4 @@
-// server-yt.js - Solo YouTube
+// server-yt v2 - YouTube + stubs FB
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -355,12 +355,21 @@ Comentario: ${comment}`;
   }
 });
 
-app.get('/version', (req, res) => res.json({ version: 'server-yt-v1' }));
+// FB stubs - devuelven vacio, no rompen el frontend
+app.get('/fb/comments', async (req, res) => {
+  res.json({ comments: [], nextCursor: null });
+});
+
+app.post('/fb/comments/:id/reply', async (req, res) => {
+  res.json({ ok: true });
+});
+
+app.get('/version', (req, res) => res.json({ version: 'server-yt-v2' }));
 
 const PORT = process.env.PORT || 3000;
 initDB().then(() => {
-  app.listen(PORT, () => console.log(`server-yt corriendo en puerto ${PORT}`));
+  app.listen(PORT, () => console.log(`server-yt-v2 corriendo en puerto ${PORT}`));
 }).catch(e => {
   console.error('Error iniciando DB:', e.message);
-  app.listen(PORT, () => console.log(`server-yt sin DB en puerto ${PORT}`));
+  app.listen(PORT, () => console.log(`server-yt-v2 sin DB en puerto ${PORT}`));
 });
