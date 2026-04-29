@@ -297,10 +297,10 @@ const FB_PAGE_ID = (process.env.FB_PAGE_ID || '').trim();
 // Función para traer todos los comentarios de un post paginando
 async function fetchAllPostComments(postId, token, pageId) {
   const allComments = [];
-  let url = `https://graph.facebook.com/v19.0/${postId}/comments?fields=id,message,from,created_time,comments{id,from}&limit=100&access_token=${token}`;
+  let url = `https://graph.facebook.com/v19.0/${postId}/comments?fields=id,message,from,created_time,comments{id,from}&limit=20&access_token=${token}`;
   
   let pages = 0;
-  while (url && pages < 5) { // max 5 páginas por post = 500 comentarios
+  while (url && pages < 1) { // max 5 páginas por post = 500 comentarios
     const r = await fetch(url);
     const data = await r.json();
     if (!r.ok || !data.data) break;
