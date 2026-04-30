@@ -51,7 +51,7 @@ async function initDB() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
-  console.log('DB lista - v14 - ' + new Date().toISOString());
+  console.log('DB lista - v15 - ' + new Date().toISOString());
 }
 
 async function getState() {
