@@ -1,4 +1,4 @@
-// v15
+// v16
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -51,7 +51,7 @@ async function initDB() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
-  console.log('DB lista - v15 - ' + new Date().toISOString());
+  console.log('DB lista - v16 - ' + new Date().toISOString());
 }
 
 async function getState() {
@@ -294,10 +294,26 @@ app.get('/video/:id/comments', requireAuth, async (req, res) => {
 const FB_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
 const FB_PAGE_ID = (process.env.FB_PAGE_ID || '').trim();
 
+// Trae todos los comentarios de un post paginando hasta 3 páginas de 50 c/u
+async function fetchAllPostComments(postId, token) {
+  const allComments = [];
+  let url = `https://graph.facebook.com/v19.0/${postId}/comments?fields=id,message,from,created_time,comments{id,from}&limit=50&access_token=${token}`;
+  let pages = 0;
+  while (url && pages < 3) {
+    const r = await fetch(url);
+    const data = await r.json();
+    if (!r.ok || !data.data) break;
+    allComments.push(...data.data);
+    url = data.paging?.next || null;
+    pages++;
+  }
+  return allComments;
+}
+
 app.get('/fb/comments', async (req, res) => {
   try {
     const { after } = req.query;
-    let url = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time,comments.limit(50){id,message,from,created_time,comments{id,from}}&limit=20&access_token=${FB_TOKEN}`;
+    let url = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time&limit=20&access_token=${FB_TOKEN}`;
     if (after) url += `&after=${after}`;
     const r = await fetch(url);
     const data = await r.json();
@@ -309,8 +325,9 @@ app.get('/fb/comments', async (req, res) => {
     const comments = [];
 
     for (const post of (data.data || [])) {
-      if (!post.comments?.data?.length) continue;
-      for (const c of post.comments.data) {
+      const postComments = await fetchAllPostComments(post.id, FB_TOKEN);
+
+      for (const c of postComments) {
         if (c.from?.id === FB_PAGE_ID) continue;
         const replies = c.comments?.data || [];
         const answeredByMe = replies.some(r => r.from?.id === FB_PAGE_ID);
