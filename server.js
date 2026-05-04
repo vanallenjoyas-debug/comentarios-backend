@@ -509,4 +509,24 @@ Comentario: ${comment}`;
         messages: [{ role: 'user', content: prompt }]
       })
     });
-    const data = await response
+    const data = await response.json();
+    if (!response.ok) {
+      return res.status(500).json({ error: data.error?.message || 'Error de API' });
+    }
+    res.json({ suggestion: data.content?.[0]?.text || '' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+if (require.main === module) {
+  initDB().then(() => {
+    app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
+  }).catch(e => {
+    console.error('Error iniciando DB:', e.message);
+    app.listen(PORT, () => console.log(`Servidor corriendo sin DB en puerto ${PORT}`));
+  });
+}
+
+module.exports = { app, initDB, getState, markAnswered, markDiscarded, getExamples };
