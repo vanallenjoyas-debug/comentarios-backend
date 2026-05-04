@@ -1,4 +1,4 @@
-// v18
+// v19
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -51,7 +51,7 @@ async function initDB() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
-  console.log('DB lista - v18 - ' + new Date().toISOString());
+  console.log('DB lista - v19 - ' + new Date().toISOString());
 }
 
 async function getState() {
@@ -238,15 +238,17 @@ app.get('/video/:id', requireAuth, async (req, res) => {
 app.get('/channel/videos', requireAuth, async (req, res) => {
   try {
     const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
-    const { pageToken } = req.query;
-    const response = await youtube.search.list({
+    const { pageToken, duration } = req.query;
+    const params = {
       part: 'snippet',
       channelId: process.env.YOUTUBE_CHANNEL_ID,
       type: 'video',
       order: 'date',
       maxResults: 50,
       pageToken: pageToken || undefined
-    });
+    };
+    if (duration === 'long') params.videoDuration = 'long';
+    const response = await youtube.search.list(params);
     const videos = response.data.items.map(item => ({
       id: item.id.videoId,
       title: item.snippet.title,
