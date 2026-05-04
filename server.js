@@ -1,4 +1,4 @@
-// v20
+// v21
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -51,7 +51,11 @@ async function initDB() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
-  console.log('DB lista - v20 - ' + new Date().toISOString());
+  // Agregar columna source si no existe (migración para tabla existente)
+  await pool.query(`
+    ALTER TABLE comment_state ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'javi'
+  `);
+  console.log('DB lista - v21 - ' + new Date().toISOString());
 }
 
 async function getState() {
@@ -61,12 +65,12 @@ async function getState() {
   return { answered, discarded };
 }
 
-async function markAnswered(id, commentText, replyText, videoTitle) {
+async function markAnswered(id, commentText, replyText, videoTitle, source = 'javi') {
   await pool.query(`
-    INSERT INTO comment_state (id, status, comment_text, reply_text, video_title)
-    VALUES ($1, 'answered', $2, $3, $4)
-    ON CONFLICT (id) DO UPDATE SET status='answered', reply_text=$3, video_title=$4
-  `, [id, commentText || '', replyText || '', videoTitle || '']);
+    INSERT INTO comment_state (id, status, comment_text, reply_text, video_title, source)
+    VALUES ($1, 'answered', $2, $3, $4, $5)
+    ON CONFLICT (id) DO UPDATE SET status='answered', reply_text=$3, video_title=$4, source=$5
+  `, [id, commentText || '', replyText || '', videoTitle || '', source]);
 }
 
 async function markDiscarded(id) {
@@ -81,6 +85,7 @@ async function getExamples(limit = 20) {
   const res = await pool.query(`
     SELECT comment_text, reply_text, video_title FROM comment_state
     WHERE status = 'answered' AND comment_text != '' AND reply_text != ''
+    AND (source = 'javi' OR source IS NULL)
     ORDER BY created_at DESC LIMIT $1
   `, [limit]);
   return res.rows;
@@ -216,7 +221,8 @@ app.post('/comments/:id/reply', requireAuth, async (req, res) => {
       part: 'snippet',
       requestBody: { snippet: { parentId: id, textOriginal: text } }
     });
-    if (req.body.userEdited) await markAnswered(id, commentText || '', text, req.body.videoTitle || '');
+    const source = req.body.userEdited ? 'javi' : 'ai';
+    await markAnswered(id, commentText || '', text, req.body.videoTitle || '', source);
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
@@ -387,7 +393,8 @@ app.post('/fb/comments/:id/reply', async (req, res) => {
       console.error('FB reply error:', JSON.stringify(data));
       return res.status(500).json({ error: data.error?.message || 'Error al responder' });
     }
-    if (req.body.userEdited) await markAnswered(id, commentText || '', text, req.body.videoTitle || '');
+    const source = req.body.userEdited ? 'javi' : 'ai';
+    await markAnswered(id, commentText || '', text, req.body.videoTitle || '', source);
     res.json({ ok: true });
   } catch (e) {
     console.error('fb reply error:', e.message);
