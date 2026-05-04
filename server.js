@@ -1,4 +1,4 @@
-// v17
+// v18
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -51,7 +51,7 @@ async function initDB() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
-  console.log('DB lista - v17 - ' + new Date().toISOString());
+  console.log('DB lista - v18 - ' + new Date().toISOString());
 }
 
 async function getState() {
@@ -299,20 +299,13 @@ app.get('/video/:id/comments', requireAuth, async (req, res) => {
 const FB_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
 const FB_PAGE_ID = (process.env.FB_PAGE_ID || '').trim();
 
-// Trae todos los comentarios de un post paginando hasta 3 páginas de 50 c/u
+// Trae la primera página de comentarios de un post (máximo 50)
 async function fetchAllPostComments(postId, token) {
-  const allComments = [];
-  let url = `https://graph.facebook.com/v19.0/${postId}/comments?fields=id,message,from,created_time,comments{id,from}&limit=50&access_token=${token}`;
-  let pages = 0;
-  while (url && pages < 3) {
-    const r = await fetch(url);
-    const data = await r.json();
-    if (!r.ok || !data.data) break;
-    allComments.push(...data.data);
-    url = data.paging?.next || null;
-    pages++;
-  }
-  return allComments;
+  const url = `https://graph.facebook.com/v19.0/${postId}/comments?fields=id,message,from,created_time,comments{id,from}&limit=50&access_token=${token}`;
+  const r = await fetch(url);
+  const data = await r.json();
+  if (!r.ok || !data.data) return [];
+  return data.data;
 }
 
 app.get('/fb/comments', async (req, res) => {
@@ -330,9 +323,11 @@ app.get('/fb/comments', async (req, res) => {
     const comments = [];
 
     for (const post of (data.data || [])) {
+      if (comments.length >= 20) break;
       const postComments = await fetchAllPostComments(post.id, FB_TOKEN);
 
       for (const c of postComments) {
+        if (comments.length >= 20) break;
         if (c.from?.id === FB_PAGE_ID) continue;
         const replies = c.comments?.data || [];
         const answeredByMe = replies.some(r => r.from?.id === FB_PAGE_ID);
