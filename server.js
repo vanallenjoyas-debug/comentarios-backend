@@ -1,4 +1,4 @@
-// v19
+// v20
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -51,7 +51,7 @@ async function initDB() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
-  console.log('DB lista - v19 - ' + new Date().toISOString());
+  console.log('DB lista - v20 - ' + new Date().toISOString());
 }
 
 async function getState() {
@@ -239,7 +239,7 @@ app.get('/channel/videos', requireAuth, async (req, res) => {
   try {
     const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
     const { pageToken, duration } = req.query;
-    const params = {
+    const baseParams = {
       part: 'snippet',
       channelId: process.env.YOUTUBE_CHANNEL_ID,
       type: 'video',
@@ -247,15 +247,33 @@ app.get('/channel/videos', requireAuth, async (req, res) => {
       maxResults: 50,
       pageToken: pageToken || undefined
     };
-    if (duration === 'long') params.videoDuration = 'long';
-    const response = await youtube.search.list(params);
-    const videos = response.data.items.map(item => ({
+
+    let items = [];
+    let nextPageToken = null;
+
+    if (duration === 'long') {
+      // Traer medium (4-20 min) y long (>20 min) en paralelo y combinar
+      const [resMedium, resLong] = await Promise.all([
+        youtube.search.list({ ...baseParams, videoDuration: 'medium' }),
+        youtube.search.list({ ...baseParams, videoDuration: 'long' })
+      ]);
+      items = [...(resMedium.data.items || []), ...(resLong.data.items || [])];
+      // Ordenar por fecha descendente
+      items.sort((a, b) => new Date(b.snippet.publishedAt) - new Date(a.snippet.publishedAt));
+      nextPageToken = resMedium.data.nextPageToken || resLong.data.nextPageToken || null;
+    } else {
+      const response = await youtube.search.list(baseParams);
+      items = response.data.items || [];
+      nextPageToken = response.data.nextPageToken || null;
+    }
+
+    const videos = items.map(item => ({
       id: item.id.videoId,
       title: item.snippet.title,
       publishedAt: item.snippet.publishedAt,
       thumbnail: item.snippet.thumbnails?.default?.url || ''
     }));
-    res.json({ videos, nextPageToken: response.data.nextPageToken || null });
+    res.json({ videos, nextPageToken });
   } catch (e) {
     console.error('channel/videos error:', e.message);
     res.status(500).json({ error: e.message });
@@ -491,24 +509,4 @@ Comentario: ${comment}`;
         messages: [{ role: 'user', content: prompt }]
       })
     });
-    const data = await response.json();
-    if (!response.ok) {
-      return res.status(500).json({ error: data.error?.message || 'Error de API' });
-    }
-    res.json({ suggestion: data.content?.[0]?.text || '' });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-const PORT = process.env.PORT || 3000;
-if (require.main === module) {
-  initDB().then(() => {
-    app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
-  }).catch(e => {
-    console.error('Error iniciando DB:', e.message);
-    app.listen(PORT, () => console.log(`Servidor corriendo sin DB en puerto ${PORT}`));
-  });
-}
-
-module.exports = { app, initDB, getState, markAnswered, markDiscarded, getExamples };
+    const data = await response
