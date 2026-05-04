@@ -1,4 +1,4 @@
-// v16
+// v17
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -51,7 +51,7 @@ async function initDB() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
-  console.log('DB lista - v16 - ' + new Date().toISOString());
+  console.log('DB lista - v17 - ' + new Date().toISOString());
 }
 
 async function getState() {
@@ -173,13 +173,16 @@ app.get('/comments', requireAuth, async (req, res) => {
   try {
     const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
     const { pageToken } = req.query;
-    const response = await youtube.commentThreads.list({
-      part: 'snippet,replies',
-      allThreadsRelatedToChannelId: process.env.YOUTUBE_CHANNEL_ID,
-      maxResults: 50,
-      order: 'time',
-      pageToken: pageToken || undefined
-    });
+    const [response, state] = await Promise.all([
+      youtube.commentThreads.list({
+        part: 'snippet,replies',
+        allThreadsRelatedToChannelId: process.env.YOUTUBE_CHANNEL_ID,
+        maxResults: 50,
+        order: 'time',
+        pageToken: pageToken || undefined
+      }),
+      getState()
+    ]);
     const comments = response.data.items.map(item => {
       const replies = item.replies?.comments || [];
       const answeredByMe = replies.some(r => r.snippet.authorChannelId?.value === MY_CHANNEL_ID);
@@ -192,7 +195,9 @@ app.get('/comments', requireAuth, async (req, res) => {
         publishedAt: item.snippet.topLevelComment.snippet.publishedAt,
         likeCount: item.snippet.topLevelComment.snippet.likeCount,
         replyCount: item.snippet.totalReplyCount,
-        answeredByMe
+        answeredByMe,
+        answered: answeredByMe || state.answered.includes(item.id),
+        network: 'yt'
       };
     });
     res.json({ comments, nextPageToken: response.data.nextPageToken || null });
@@ -500,9 +505,13 @@ Comentario: ${comment}`;
 });
 
 const PORT = process.env.PORT || 3000;
-initDB().then(() => {
-  app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
-}).catch(e => {
-  console.error('Error iniciando DB:', e.message);
-  app.listen(PORT, () => console.log(`Servidor corriendo sin DB en puerto ${PORT}`));
-});
+if (require.main === module) {
+  initDB().then(() => {
+    app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
+  }).catch(e => {
+    console.error('Error iniciando DB:', e.message);
+    app.listen(PORT, () => console.log(`Servidor corriendo sin DB en puerto ${PORT}`));
+  });
+}
+
+module.exports = { app, initDB, getState, markAnswered, markDiscarded, getExamples };
