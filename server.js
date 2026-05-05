@@ -216,17 +216,21 @@ app.get('/comments', requireAuth, async (req, res) => {
 app.post('/comments/:id/reply', requireAuth, async (req, res) => {
   const { id } = req.params;
   const { text, commentText } = req.body;
+  console.log(`[reply] id=${id} text="${text}" commentText="${commentText}" userEdited=${req.body.userEdited} videoTitle="${req.body.videoTitle}"`);
   try {
     const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
+    console.log('[reply] llamando a youtube.comments.insert...');
     await youtube.comments.insert({
       part: 'snippet',
       requestBody: { snippet: { parentId: id, textOriginal: text } }
     });
+    console.log('[reply] youtube ok. llamando a markAnswered...');
     const source = req.body.userEdited ? 'javi' : 'ai';
     await markAnswered(id, commentText || '', text, req.body.videoTitle || '', source);
+    console.log('[reply] markAnswered ok. source=' + source);
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    console.error('[reply] ERROR:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
