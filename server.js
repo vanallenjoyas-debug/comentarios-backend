@@ -1,4 +1,4 @@
-// v26
+// v27
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -76,7 +76,7 @@ async function initDB() {
   } else {
     console.log('initDB: columna categoria ya existe.');
   }
-  console.log('DB lista - v26 - ' + new Date().toISOString());
+  console.log('DB lista - v27 - ' + new Date().toISOString());
 }
 
 async function getState() {
@@ -416,42 +416,54 @@ async function fetchAllPostComments(postId, token) {
 app.get('/fb/comments', async (req, res) => {
   try {
     const { after } = req.query;
-    let url = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time&limit=20&access_token=${FB_TOKEN}`;
-    if (after) url += `&after=${after}`;
-    const r = await fetch(url);
-    const data = await r.json();
-    if (!r.ok) {
-      console.error('FB error:', JSON.stringify(data));
-      return res.status(500).json({ error: data.error?.message || 'Error de Facebook' });
-    }
     const state = await getState();
     const comments = [];
+    let nextCursor = null;
+    let pageUrl = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time&limit=20&access_token=${FB_TOKEN}`;
+    if (after) pageUrl += `&after=${after}`;
+    let pagesChecked = 0;
+    const MAX_PAGES = 5; // máximo 100 posts por request
 
-    for (const post of (data.data || [])) {
-      if (comments.length >= 20) break;
-      const postComments = await fetchAllPostComments(post.id, FB_TOKEN);
-
-      for (const c of postComments) {
-        if (comments.length >= 20) break;
-        if (c.from?.id === FB_PAGE_ID) continue;
-        const replies = c.comments?.data || [];
-        const answeredByMe = replies.some(r => r.from?.id === FB_PAGE_ID);
-        if (answeredByMe) continue;
-        if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
-        comments.push({
-          id: c.id,
-          postId: post.id,
-          postMessage: post.message || '',
-          text: c.message,
-          author: c.from?.name || 'Usuario',
-          authorPhoto: `https://graph.facebook.com/${c.from?.id}/picture?type=square`,
-          publishedAt: c.created_time,
-          network: 'fb'
-        });
+    while (pageUrl && comments.length < 20 && pagesChecked < MAX_PAGES) {
+      const r = await fetch(pageUrl);
+      const data = await r.json();
+      if (!r.ok) {
+        console.error('FB error:', JSON.stringify(data));
+        return res.status(500).json({ error: data.error?.message || 'Error de Facebook' });
       }
+
+      for (const post of (data.data || [])) {
+        if (comments.length >= 20) break;
+        const postComments = await fetchAllPostComments(post.id, FB_TOKEN);
+
+        for (const c of postComments) {
+          if (comments.length >= 20) break;
+          if (c.from?.id === FB_PAGE_ID) continue;
+          const replies = c.comments?.data || [];
+          const answeredByMe = replies.some(r => r.from?.id === FB_PAGE_ID);
+          if (answeredByMe) continue;
+          if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
+          comments.push({
+            id: c.id,
+            postId: post.id,
+            postMessage: post.message || '',
+            text: c.message,
+            author: c.from?.name || 'Usuario',
+            authorPhoto: `https://graph.facebook.com/${c.from?.id}/picture?type=square`,
+            publishedAt: c.created_time,
+            network: 'fb'
+          });
+        }
+      }
+
+      nextCursor = data.paging?.cursors?.after || null;
+      // Seguir a la próxima página de posts solo si necesitamos más comentarios
+      pageUrl = (comments.length < 20 && data.paging?.next) ? data.paging.next : null;
+      pagesChecked++;
     }
 
-    res.json({ comments, nextCursor: data.paging?.cursors?.after || null });
+    console.log(`[fb/comments] ${comments.length} comentarios encontrados en ${pagesChecked} página(s) de posts`);
+    res.json({ comments, nextCursor });
   } catch (e) {
     console.error('fb/comments error:', e.message);
     res.status(500).json({ error: e.message });
