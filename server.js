@@ -1,4 +1,4 @@
-// v23
+// v24
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -52,11 +52,19 @@ async function initDB() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
-  console.log('initDB: CREATE TABLE ok. Iniciando ALTER TABLE...');
-  await pool.query(`
-    ALTER TABLE comment_state ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'javi'
+  console.log('initDB: CREATE TABLE ok. Chequeando columna source...');
+  const colCheck = await pool.query(`
+    SELECT column_name FROM information_schema.columns
+    WHERE table_name='comment_state' AND column_name='source'
   `);
-  console.log('DB lista - v23 - ' + new Date().toISOString());
+  if (colCheck.rows.length === 0) {
+    console.log('initDB: columna source no existe, agregando...');
+    await pool.query(`ALTER TABLE comment_state ADD COLUMN source TEXT DEFAULT 'javi'`);
+    console.log('initDB: columna source agregada.');
+  } else {
+    console.log('initDB: columna source ya existe, saltando ALTER TABLE.');
+  }
+  console.log('DB lista - v24 - ' + new Date().toISOString());
 }
 
 async function getState() {
