@@ -41,6 +41,7 @@ console.log("DB URL:", process.env.PG_URL || process.env.DATABASE_URL || "NO URL
 const pool = new Pool({ connectionString: process.env.PG_URL });
 
 async function initDB() {
+  console.log('initDB: iniciando CREATE TABLE...');
   await pool.query(`
     CREATE TABLE IF NOT EXISTS comment_state (
       id TEXT PRIMARY KEY,
@@ -51,7 +52,7 @@ async function initDB() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
-  // Agregar columna source si no existe (migración para tabla existente)
+  console.log('initDB: CREATE TABLE ok. Iniciando ALTER TABLE...');
   await pool.query(`
     ALTER TABLE comment_state ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'javi'
   `);
