@@ -1,4 +1,4 @@
-// v24
+// v25
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -64,7 +64,7 @@ async function initDB() {
   } else {
     console.log('initDB: columna source ya existe, saltando ALTER TABLE.');
   }
-  console.log('DB lista - v24 - ' + new Date().toISOString());
+  console.log('DB lista - v25 - ' + new Date().toISOString());
 }
 
 async function getState() {
@@ -468,13 +468,14 @@ app.post('/suggest-reply', async (req, res) => {
   let ejemplosBloque = '';
   try {
     const examples = await getExamples(50);
+    console.log(`[suggest] ejemplos cargados de Postgres: ${examples.length}`);
     if (examples.length > 0) {
       ejemplosBloque = '\n\nAPRENDÉ EL TONO de estos ejemplos reales de Javi. No copies ninguno igual — usalos como guía de estilo:\n';
       examples.forEach((ex, i) => {
         ejemplosBloque += `\nEjemplo ${i+1}:${ex.video_title ? "\n(Video: "+ex.video_title+")" : ""}\nComentario: "${ex.comment_text}"\nRespuesta: "${ex.reply_text}"\n`;
       });
     }
-  } catch(e) {}
+  } catch(e) { console.log('[suggest] error cargando ejemplos:', e.message); }
 
   const prompt = `Sos Javi (Javier Romero), joyero argentino del canal Joyeria Sudaca. Tu tono es casual, directo, rioplatense natural — sin exagerar el acento, sin sonar a robot.${ejemplosBloque}
 
