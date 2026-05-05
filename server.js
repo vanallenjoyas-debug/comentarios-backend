@@ -1,4 +1,4 @@
-// v25
+// v26
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -17,7 +17,7 @@ app.use((req, res, next) => {
     } catch(e) {
       req.body = {};
     }
-     next();
+    next();
   });
 });
 
@@ -64,7 +64,19 @@ async function initDB() {
   } else {
     console.log('initDB: columna source ya existe, saltando ALTER TABLE.');
   }
-  console.log('DB lista - v25 - ' + new Date().toISOString());
+  // Migración columna categoria
+  const catCheck = await pool.query(`
+    SELECT column_name FROM information_schema.columns
+    WHERE table_name='comment_state' AND column_name='categoria'
+  `);
+  if (catCheck.rows.length === 0) {
+    console.log('initDB: agregando columna categoria...');
+    await pool.query(`ALTER TABLE comment_state ADD COLUMN categoria TEXT DEFAULT 'otro'`);
+    console.log('initDB: columna categoria agregada.');
+  } else {
+    console.log('initDB: columna categoria ya existe.');
+  }
+  console.log('DB lista - v26 - ' + new Date().toISOString());
 }
 
 async function getState() {
@@ -90,14 +102,64 @@ async function markDiscarded(id) {
   `, [id]);
 }
 
-async function getExamples(limit = 20) {
+async function getExamples(limit = 20, categoria = null) {
+  // Si hay categoría, intentar traer ejemplos específicos primero
+  if (categoria && categoria !== 'otro') {
+    const res = await pool.query(`
+      SELECT comment_text, reply_text, video_title FROM comment_state
+      WHERE status = 'answered' AND comment_text != '' AND reply_text != ''
+      AND (source = 'javi' OR source IS NULL)
+      AND categoria = $2
+      ORDER BY RANDOM() LIMIT $1
+    `, [limit, categoria]);
+    if (res.rows.length >= 5) return res.rows;
+  }
+  // Fallback: ejemplos aleatorios generales
   const res = await pool.query(`
     SELECT comment_text, reply_text, video_title FROM comment_state
     WHERE status = 'answered' AND comment_text != '' AND reply_text != ''
     AND (source = 'javi' OR source IS NULL)
-    ORDER BY created_at DESC LIMIT $1
+    ORDER BY RANDOM() LIMIT $1
   `, [limit]);
   return res.rows;
+}
+
+const CATEGORIAS_VALIDAS = ['elogio','yeti_hibrido','sudaca','proceso','aprender','narracion','compra','curso','gracioso','otro'];
+
+async function clasificarComentario(text) {
+  const apiKey = (process.env.ANTHROPIC_API_KEY || '').trim();
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5',
+        max_tokens: 10,
+        messages: [{ role: 'user', content: `Clasificá este comentario de YouTube en UNA categoría. Respondé SOLO la palabra clave.
+
+Categorías:
+- elogio (felicitaciones, le gusta el video, apoyo)
+- yeti_hibrido (lo llaman yeti, híbrido, parecido a alguien)
+- sudaca (orgullo sudaca, joyería sudaca)
+- proceso (preguntas sobre proceso técnico o químico)
+- aprender (quieren aprender joyería, consejos para empezar)
+- narracion (elogian cómo habla o explica)
+- compra (quieren comprar, preguntan envío o precio)
+- curso (preguntan por cursos o clases)
+- gracioso (humor, chiste)
+- otro
+
+Comentario: "${text.substring(0, 200)}"` }]
+      })
+    });
+    const data = await r.json();
+    const cat = (data.content?.[0]?.text || '').trim().toLowerCase().split(/\s/)[0];
+    return CATEGORIAS_VALIDAS.includes(cat) ? cat : 'otro';
+  } catch(e) { return 'otro'; }
+}
+
+async function actualizarCategoria(id, categoria) {
+  await pool.query(`UPDATE comment_state SET categoria = $2 WHERE id = $1`, [id, categoria]);
 }
 
 const oauth2Client = new google.auth.OAuth2(
@@ -236,6 +298,10 @@ app.post('/comments/:id/reply', requireAuth, async (req, res) => {
     const source = req.body.userEdited ? 'javi' : 'ai';
     await markAnswered(id, commentText || '', text, req.body.videoTitle || '', source);
     console.log('[reply] markAnswered ok. source=' + source);
+    // Clasificar en background sin bloquear la respuesta
+    if (source === 'javi' && commentText) {
+      clasificarComentario(commentText).then(cat => actualizarCategoria(id, cat)).catch(() => {});
+    }
     res.json({ ok: true });
   } catch (e) {
     console.error('[reply] ERROR:', e.message);
@@ -408,6 +474,10 @@ app.post('/fb/comments/:id/reply', async (req, res) => {
     }
     const source = req.body.userEdited ? 'javi' : 'ai';
     await markAnswered(id, commentText || '', text, req.body.videoTitle || '', source);
+    // Clasificar en background sin bloquear la respuesta
+    if (source === 'javi' && commentText) {
+      clasificarComentario(commentText).then(cat => actualizarCategoria(id, cat)).catch(() => {});
+    }
     res.json({ ok: true });
   } catch (e) {
     console.error('fb reply error:', e.message);
@@ -467,8 +537,10 @@ app.post('/suggest-reply', async (req, res) => {
 
   let ejemplosBloque = '';
   try {
-    const examples = await getExamples(50);
-    console.log(`[suggest] ejemplos cargados de Postgres: ${examples.length}`);
+    const categoria = await clasificarComentario(comment);
+    console.log(`[suggest] categoria detectada: ${categoria}`);
+    const examples = await getExamples(20, categoria);
+    console.log(`[suggest] ejemplos cargados: ${examples.length} (categoria: ${categoria})`);
     if (examples.length > 0) {
       ejemplosBloque = '\n\nAPRENDÉ EL TONO de estos ejemplos reales de Javi. No copies ninguno igual — usalos como guía de estilo:\n';
       examples.forEach((ex, i) => {
