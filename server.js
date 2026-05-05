@@ -1,4 +1,4 @@
-// v27
+// v28
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -76,7 +76,7 @@ async function initDB() {
   } else {
     console.log('initDB: columna categoria ya existe.');
   }
-  console.log('DB lista - v27 - ' + new Date().toISOString());
+  console.log('DB lista - v28 - ' + new Date().toISOString());
 }
 
 async function getState() {
@@ -418,6 +418,7 @@ app.get('/fb/comments', async (req, res) => {
     const { after } = req.query;
     const state = await getState();
     const comments = [];
+    const seenIds = new Set();
     let nextCursor = null;
     let pageUrl = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time&limit=20&access_token=${FB_TOKEN}`;
     if (after) pageUrl += `&after=${after}`;
@@ -438,11 +439,13 @@ app.get('/fb/comments', async (req, res) => {
 
         for (const c of postComments) {
           if (comments.length >= 20) break;
+          if (seenIds.has(c.id)) continue;
           if (c.from?.id === FB_PAGE_ID) continue;
           const replies = c.comments?.data || [];
           const answeredByMe = replies.some(r => r.from?.id === FB_PAGE_ID);
           if (answeredByMe) continue;
           if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
+          seenIds.add(c.id);
           comments.push({
             id: c.id,
             postId: post.id,
