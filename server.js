@@ -17,7 +17,7 @@ app.use((req, res, next) => {
     } catch(e) {
       req.body = {};
     }
-    next();
+     next();
   });
 });
 
