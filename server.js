@@ -1,4 +1,4 @@
-// v30
+// v31
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -76,7 +76,7 @@ async function initDB() {
   } else {
     console.log('initDB: columna categoria ya existe.');
   }
-  console.log('DB lista - v30 - ' + new Date().toISOString());
+  console.log('DB lista - v31 - ' + new Date().toISOString());
 }
 
 async function getState() {
@@ -430,6 +430,7 @@ app.get('/video/:id/comments', requireAuth, async (req, res) => {
 
 const FB_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
 const FB_PAGE_ID = (process.env.FB_PAGE_ID || '').trim();
+const IG_USER_ID = (process.env.IG_USER_ID || '').trim();
 
 // Trae la primera página de comentarios de un post (máximo 50)
 async function fetchAllPostComments(postId, token) {
@@ -524,6 +525,102 @@ app.post('/fb/comments/:id/reply', async (req, res) => {
     res.json({ ok: true });
   } catch (e) {
     console.error('fb reply error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+async function fetchIGMediaComments(mediaId, token) {
+  const url = `https://graph.facebook.com/v19.0/${mediaId}/comments?fields=id,text,username,timestamp,replies{id,username}&limit=50&access_token=${token}`;
+  const r = await fetch(url);
+  const data = await r.json();
+  if (!r.ok || !data.data) return [];
+  return data.data;
+}
+
+app.get('/ig/comments', async (req, res) => {
+  try {
+    if (!IG_USER_ID || !FB_TOKEN) return res.status(500).json({ error: 'IG no configurado' });
+    const { after } = req.query;
+    const state = await getState();
+    const comments = [];
+    const seenIds = new Set();
+    let mediaUrl = `https://graph.facebook.com/v19.0/${IG_USER_ID}/media?fields=id,caption,timestamp,media_type&limit=20&access_token=${FB_TOKEN}`;
+    if (after) mediaUrl += `&after=${after}`;
+    let pagesChecked = 0;
+    const MAX_PAGES = 5;
+    let nextCursor = null;
+
+    while (mediaUrl && pagesChecked < MAX_PAGES) {
+      const r = await fetch(mediaUrl);
+      const data = await r.json();
+      if (!r.ok) {
+        console.error('IG error:', JSON.stringify(data));
+        return res.status(500).json({ error: data.error?.message || 'Error de Instagram' });
+      }
+
+      for (const media of (data.data || [])) {
+        if (media.media_type === 'STORY') continue;
+        const mediaComments = await fetchIGMediaComments(media.id, FB_TOKEN);
+        for (const c of mediaComments) {
+          if (seenIds.has(c.id)) continue;
+          if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
+          seenIds.add(c.id);
+          comments.push({
+            id: c.id,
+            postId: media.id,
+            postMessage: media.caption || '',
+            text: c.text,
+            author: c.username || 'Usuario',
+            authorPhoto: null,
+            publishedAt: c.timestamp,
+            network: 'ig'
+          });
+        }
+      }
+
+      nextCursor = data.paging?.cursors?.after || null;
+      mediaUrl = data.paging?.next || null;
+      pagesChecked++;
+    }
+
+    comments.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
+    const top20 = comments.slice(0, 20);
+    console.log(`[ig/comments] ${comments.length} encontrados en ${pagesChecked} página(s), devolviendo ${top20.length}`);
+    res.json({ comments: top20, nextCursor });
+  } catch (e) {
+    console.error('ig/comments error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/ig/comments/:id/reply', async (req, res) => {
+  const { id } = req.params;
+  const { text, commentText } = req.body;
+  console.log(`[ig/reply] id=${id} text="${text}"`);
+  try {
+    if (!FB_TOKEN) return res.status(500).json({ error: 'IG no configurado' });
+    const replyRes = await fetch(
+      `https://graph.facebook.com/v19.0/${id}/replies?access_token=${FB_TOKEN}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text })
+      }
+    );
+    const replyData = await replyRes.json();
+    if (!replyRes.ok) {
+      console.error('[ig/reply] error:', JSON.stringify(replyData));
+      return res.status(500).json({ error: replyData.error?.message || 'Error al responder' });
+    }
+    const source = req.body.userEdited ? 'javi' : 'ai';
+    await markAnswered(id, commentText || '', text, req.body.postMessage || '', source);
+    console.log(`[ig/reply] ok. source=${source}`);
+    if (source === 'javi' && commentText) {
+      clasificarComentario(commentText).then(cat => actualizarCategoria(id, cat)).catch(() => {});
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[ig/reply] ERROR:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
