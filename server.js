@@ -1,4 +1,4 @@
-// v31
+// v32
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -76,7 +76,7 @@ async function initDB() {
   } else {
     console.log('initDB: columna categoria ya existe.');
   }
-  console.log('DB lista - v31 - ' + new Date().toISOString());
+  console.log('DB lista - v32 - ' + new Date().toISOString());
 }
 
 async function getState() {
@@ -431,6 +431,7 @@ app.get('/video/:id/comments', requireAuth, async (req, res) => {
 const FB_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
 const FB_PAGE_ID = (process.env.FB_PAGE_ID || '').trim();
 const IG_USER_ID = (process.env.IG_USER_ID || '').trim();
+const IG_TOKEN = (process.env.IG_ACCESS_TOKEN || '').trim();
 
 // Trae la primera página de comentarios de un post (máximo 50)
 async function fetchAllPostComments(postId, token) {
@@ -530,7 +531,7 @@ app.post('/fb/comments/:id/reply', async (req, res) => {
 });
 
 async function fetchIGMediaComments(mediaId, token) {
-  const url = `https://graph.facebook.com/v19.0/${mediaId}/comments?fields=id,text,username,timestamp,replies{id,username}&limit=50&access_token=${token}`;
+  const url = `https://graph.instagram.com/v19.0/${mediaId}/comments?fields=id,text,username,timestamp,replies{id,username}&limit=50&access_token=${token}`;
   const r = await fetch(url);
   const data = await r.json();
   if (!r.ok || !data.data) return [];
@@ -539,12 +540,12 @@ async function fetchIGMediaComments(mediaId, token) {
 
 app.get('/ig/comments', async (req, res) => {
   try {
-    if (!IG_USER_ID || !FB_TOKEN) return res.status(500).json({ error: 'IG no configurado' });
+    if (!IG_USER_ID || !IG_TOKEN) return res.status(500).json({ error: 'IG no configurado' });
     const { after } = req.query;
     const state = await getState();
     const comments = [];
     const seenIds = new Set();
-    let mediaUrl = `https://graph.facebook.com/v19.0/${IG_USER_ID}/media?fields=id,caption,timestamp,media_type&limit=20&access_token=${FB_TOKEN}`;
+    let mediaUrl = `https://graph.instagram.com/v19.0/${IG_USER_ID}/media?fields=id,caption,timestamp,media_type&limit=20&access_token=${IG_TOKEN}`;
     if (after) mediaUrl += `&after=${after}`;
     let pagesChecked = 0;
     const MAX_PAGES = 5;
@@ -560,7 +561,7 @@ app.get('/ig/comments', async (req, res) => {
 
       for (const media of (data.data || [])) {
         if (media.media_type === 'STORY') continue;
-        const mediaComments = await fetchIGMediaComments(media.id, FB_TOKEN);
+        const mediaComments = await fetchIGMediaComments(media.id, IG_TOKEN);
         for (const c of mediaComments) {
           if (seenIds.has(c.id)) continue;
           if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
@@ -598,9 +599,9 @@ app.post('/ig/comments/:id/reply', async (req, res) => {
   const { text, commentText } = req.body;
   console.log(`[ig/reply] id=${id} text="${text}"`);
   try {
-    if (!FB_TOKEN) return res.status(500).json({ error: 'IG no configurado' });
+    if (!IG_TOKEN) return res.status(500).json({ error: 'IG no configurado' });
     const replyRes = await fetch(
-      `https://graph.facebook.com/v19.0/${id}/replies?access_token=${FB_TOKEN}`,
+      `https://graph.instagram.com/v19.0/${id}/replies?access_token=${IG_TOKEN}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
