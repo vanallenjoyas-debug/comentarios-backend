@@ -1,4 +1,4 @@
-// v28
+// v29
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -76,7 +76,7 @@ async function initDB() {
   } else {
     console.log('initDB: columna categoria ya existe.');
   }
-  console.log('DB lista - v28 - ' + new Date().toISOString());
+  console.log('DB lista - v29 - ' + new Date().toISOString());
 }
 
 async function getState() {
@@ -651,10 +651,65 @@ Comentario: ${comment}`;
   }
 });
 
+const INFO_KEYWORDS = ['info', 'información', 'curso', 'quiero info', 'quiero información', 'quiero hacer el curso'];
+const INFO_REPLIES = [
+  'Mandame mensaje privado y te paso toda la info 👋',
+  'Por privado te mando los detalles 🙌',
+  'Escribime por privado bro 👋',
+  'Mandame un privado y te cuento todo'
+];
+
+function matchesInfoKeyword(text) {
+  const lower = text.toLowerCase();
+  return INFO_KEYWORDS.some(kw => lower.includes(kw));
+}
+
+async function autoReplyFB() {
+  if (!FB_TOKEN || !FB_PAGE_ID) return;
+  try {
+    console.log('[autoReplyFB] Iniciando chequeo automático...');
+    const state = await getState();
+    const postsUrl = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time&limit=20&access_token=${FB_TOKEN}`;
+    const r = await fetch(postsUrl);
+    const data = await r.json();
+    if (!r.ok || !data.data) return;
+
+    let respondidos = 0;
+    for (const post of data.data) {
+      const postComments = await fetchAllPostComments(post.id, FB_TOKEN);
+      for (const c of postComments) {
+        if (c.from?.id === FB_PAGE_ID) continue;
+        if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
+        const replies = c.comments?.data || [];
+        const answeredByMe = replies.some(rep => rep.from?.id === FB_PAGE_ID);
+        if (answeredByMe) continue;
+        if (!matchesInfoKeyword(c.message || '')) continue;
+
+        const reply = INFO_REPLIES[Math.floor(Math.random() * INFO_REPLIES.length)];
+        const replyRes = await fetch(`https://graph.facebook.com/v19.0/${c.id}/comments?access_token=${FB_TOKEN}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: reply })
+        });
+        if (replyRes.ok) {
+          await markAnswered(c.id, c.message, reply, post.message || '', 'ai');
+          console.log(`[autoReplyFB] Respondido ${c.id}: "${reply}"`);
+          respondidos++;
+        }
+      }
+    }
+    console.log(`[autoReplyFB] Chequeo terminado. Respondidos: ${respondidos}`);
+  } catch (e) {
+    console.error('[autoReplyFB] Error:', e.message);
+  }
+}
+
 const PORT = process.env.PORT || 3000;
 if (require.main === module) {
   initDB().then(() => {
     app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
+    setInterval(autoReplyFB, 30 * 60 * 1000);
+    console.log('[autoReplyFB] Proceso automático iniciado — corre cada 30 minutos');
   }).catch(e => {
     console.error('Error iniciando DB:', e.message);
     app.listen(PORT, () => console.log(`Servidor corriendo sin DB en puerto ${PORT}`));
