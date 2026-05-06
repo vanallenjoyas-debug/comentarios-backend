@@ -1,4 +1,4 @@
-// v34
+// v36
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -76,7 +76,7 @@ async function initDB() {
   } else {
     console.log('initDB: columna categoria ya existe.');
   }
-  console.log('DB lista - v34 - ' + new Date().toISOString());
+  console.log('DB lista - v36 - ' + new Date().toISOString());
 }
 
 async function getState() {
@@ -462,10 +462,10 @@ app.get('/fb/comments', async (req, res) => {
         return res.status(500).json({ error: data.error?.message || 'Error de Facebook' });
       }
 
-      for (const post of (data.data || [])) {
-        const postComments = await fetchAllPostComments(post.id, FB_TOKEN);
-
-        for (const c of postComments) {
+      const posts = data.data || [];
+      const allPostComments = await Promise.all(posts.map(post => fetchAllPostComments(post.id, FB_TOKEN).then(cs => ({ post, cs }))));
+      for (const { post, cs } of allPostComments) {
+        for (const c of cs) {
           if (seenIds.has(c.id)) continue;
           if (c.from?.id === FB_PAGE_ID) continue;
           const replies = c.comments?.data || [];
@@ -531,12 +531,20 @@ app.post('/fb/comments/:id/reply', async (req, res) => {
 });
 
 async function fetchIGMediaComments(mediaId, token) {
-  const url = `https://graph.instagram.com/v19.0/${mediaId}/comments?fields=id,text,username,timestamp&limit=50&access_token=${token}`;
-  const r = await fetch(url);
-  const data = await r.json();
-  console.log(`[ig/fetchComments] media=${mediaId} ok=${r.ok} count=${data.data?.length ?? 'N/A'} error=${data.error?.message || 'none'}`);
-  if (!r.ok || !data.data) return [];
-  return data.data;
+  const allComments = [];
+  let url = `https://graph.instagram.com/v19.0/${mediaId}/comments?fields=id,text,username,timestamp&limit=50&access_token=${token}`;
+  let page = 0;
+  const MAX_PAGES = 10;
+  while (url && page < MAX_PAGES) {
+    const r = await fetch(url);
+    const data = await r.json();
+    console.log(`[ig/fetchComments] media=${mediaId} page=${page} ok=${r.ok} count=${data.data?.length ?? 'N/A'} error=${data.error?.message || 'none'}`);
+    if (!r.ok || !data.data) break;
+    allComments.push(...data.data);
+    url = data.paging?.next || null;
+    page++;
+  }
+  return allComments;
 }
 
 app.get('/ig/comments', async (req, res) => {
@@ -560,10 +568,10 @@ app.get('/ig/comments', async (req, res) => {
         return res.status(500).json({ error: data.error?.message || 'Error de Instagram' });
       }
 
-      for (const media of (data.data || [])) {
-        if (media.media_type === 'STORY') continue;
-        const mediaComments = await fetchIGMediaComments(media.id, IG_TOKEN);
-        for (const c of mediaComments) {
+      const medias = (data.data || []).filter(m => m.media_type !== 'STORY');
+      const allMediaComments = await Promise.all(medias.map(media => fetchIGMediaComments(media.id, IG_TOKEN).then(cs => ({ media, cs }))));
+      for (const { media, cs } of allMediaComments) {
+        for (const c of cs) {
           if (seenIds.has(c.id)) continue;
           if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
           seenIds.add(c.id);
