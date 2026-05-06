@@ -1,4 +1,4 @@
-// v29
+// v30
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -76,7 +76,7 @@ async function initDB() {
   } else {
     console.log('initDB: columna categoria ya existe.');
   }
-  console.log('DB lista - v29 - ' + new Date().toISOString());
+  console.log('DB lista - v30 - ' + new Date().toISOString());
 }
 
 async function getState() {
@@ -249,17 +249,36 @@ app.get('/comments', requireAuth, async (req, res) => {
   try {
     const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
     const { pageToken } = req.query;
-    const [response, state] = await Promise.all([
-      youtube.commentThreads.list({
+    const state = await getState();
+
+    let allItems = [];
+    let currentPageToken = pageToken || undefined;
+    let lastNextPageToken = null;
+    const MAX_YT_PAGES = 3;
+    let pagesChecked = 0;
+
+    while (pagesChecked < MAX_YT_PAGES) {
+      const response = await youtube.commentThreads.list({
         part: 'snippet,replies',
         allThreadsRelatedToChannelId: process.env.YOUTUBE_CHANNEL_ID,
         maxResults: 50,
         order: 'time',
-        pageToken: pageToken || undefined
-      }),
-      getState()
-    ]);
-    const comments = response.data.items.map(item => {
+        pageToken: currentPageToken
+      });
+      allItems = [...allItems, ...(response.data.items || [])];
+      lastNextPageToken = response.data.nextPageToken || null;
+      pagesChecked++;
+
+      const unanswered = allItems.filter(item => {
+        const replies = item.replies?.comments || [];
+        const answeredByMe = replies.some(r => r.snippet.authorChannelId?.value === MY_CHANNEL_ID);
+        return !answeredByMe && !state.answered.includes(item.id) && !state.discarded.includes(item.id);
+      });
+      if (unanswered.length >= 20 || !lastNextPageToken) break;
+      currentPageToken = lastNextPageToken;
+    }
+
+    const comments = allItems.map(item => {
       const replies = item.replies?.comments || [];
       const answeredByMe = replies.some(r => r.snippet.authorChannelId?.value === MY_CHANNEL_ID);
       return {
@@ -276,7 +295,15 @@ app.get('/comments', requireAuth, async (req, res) => {
         network: 'yt'
       };
     });
-    res.json({ comments, nextPageToken: response.data.nextPageToken || null });
+
+    // Ordenar: primero los no respondidos más nuevos, luego los respondidos
+    comments.sort((a, b) => {
+      if (a.answered !== b.answered) return a.answered ? 1 : -1;
+      return new Date(b.publishedAt) - new Date(a.publishedAt);
+    });
+
+    console.log(`[yt/comments] ${pagesChecked} página(s), ${comments.filter(c=>!c.answered).length} sin responder`);
+    res.json({ comments, nextPageToken: lastNextPageToken });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
@@ -425,7 +452,7 @@ app.get('/fb/comments', async (req, res) => {
     let pagesChecked = 0;
     const MAX_PAGES = 5; // máximo 100 posts por request
 
-    while (pageUrl && comments.length < 20 && pagesChecked < MAX_PAGES) {
+    while (pageUrl && pagesChecked < MAX_PAGES) {
       const r = await fetch(pageUrl);
       const data = await r.json();
       if (!r.ok) {
@@ -434,11 +461,9 @@ app.get('/fb/comments', async (req, res) => {
       }
 
       for (const post of (data.data || [])) {
-        if (comments.length >= 20) break;
         const postComments = await fetchAllPostComments(post.id, FB_TOKEN);
 
         for (const c of postComments) {
-          if (comments.length >= 20) break;
           if (seenIds.has(c.id)) continue;
           if (c.from?.id === FB_PAGE_ID) continue;
           const replies = c.comments?.data || [];
@@ -460,13 +485,16 @@ app.get('/fb/comments', async (req, res) => {
       }
 
       nextCursor = data.paging?.cursors?.after || null;
-      // Seguir a la próxima página de posts solo si necesitamos más comentarios
-      pageUrl = (comments.length < 20 && data.paging?.next) ? data.paging.next : null;
+      pageUrl = data.paging?.next || null;
       pagesChecked++;
     }
 
-    console.log(`[fb/comments] ${comments.length} comentarios encontrados en ${pagesChecked} página(s) de posts`);
-    res.json({ comments, nextCursor });
+    // Ordenar por más nuevos primero y devolver los primeros 20
+    comments.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
+    const top20 = comments.slice(0, 20);
+
+    console.log(`[fb/comments] ${comments.length} encontrados en ${pagesChecked} página(s), devolviendo ${top20.length} más nuevos`);
+    res.json({ comments: top20, nextCursor });
   } catch (e) {
     console.error('fb/comments error:', e.message);
     res.status(500).json({ error: e.message });
