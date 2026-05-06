@@ -1,4 +1,4 @@
-// v32
+// v33
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -76,7 +76,7 @@ async function initDB() {
   } else {
     console.log('initDB: columna categoria ya existe.');
   }
-  console.log('DB lista - v32 - ' + new Date().toISOString());
+  console.log('DB lista - v33 - ' + new Date().toISOString());
 }
 
 async function getState() {
@@ -534,6 +534,7 @@ async function fetchIGMediaComments(mediaId, token) {
   const url = `https://graph.instagram.com/v19.0/${mediaId}/comments?fields=id,text,username,timestamp,replies{id,username}&limit=50&access_token=${token}`;
   const r = await fetch(url);
   const data = await r.json();
+  console.log(`[ig/fetchComments] media=${mediaId} ok=${r.ok} count=${data.data?.length ?? 'N/A'} error=${data.error?.message || 'none'}`);
   if (!r.ok || !data.data) return [];
   return data.data;
 }
