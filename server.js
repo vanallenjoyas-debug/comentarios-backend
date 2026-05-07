@@ -794,8 +794,9 @@ const PORT = process.env.PORT || 3000;
 if (require.main === module) {
   initDB().then(() => {
     app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
+    autoReplyFB();
     setInterval(autoReplyFB, 30 * 60 * 1000);
-    console.log('[autoReplyFB] Proceso automático iniciado — corre cada 30 minutos');
+    console.log('[autoReplyFB] Proceso automático iniciado — corre al iniciar y cada 30 minutos');
   }).catch(e => {
     console.error('Error iniciando DB:', e.message);
     app.listen(PORT, () => console.log(`Servidor corriendo sin DB en puerto ${PORT}`));
