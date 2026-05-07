@@ -751,36 +751,45 @@ function matchesInfoKeyword(text) {
 }
 
 async function autoReplyFB() {
-  if (!FB_TOKEN || !FB_PAGE_ID) return;
+  if (!FB_TOKEN || !FB_PAGE_ID) { console.error('[autoReplyFB] Falta FB_TOKEN o FB_PAGE_ID'); return; }
   try {
     console.log('[autoReplyFB] Iniciando chequeo automático...');
     const state = await getState();
     const postsUrl = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time&limit=20&access_token=${FB_TOKEN}`;
     const r = await fetch(postsUrl);
     const data = await r.json();
-    if (!r.ok || !data.data) return;
+    if (!r.ok || !data.data) {
+      console.error('[autoReplyFB] Error trayendo posts:', JSON.stringify(data));
+      return;
+    }
 
+    console.log(`[autoReplyFB] ${data.data.length} posts encontrados`);
     let respondidos = 0;
     for (const post of data.data) {
       const postComments = await fetchAllPostComments(post.id, FB_TOKEN);
+      console.log(`[autoReplyFB] Post ${post.id}: ${postComments.length} comentarios`);
       for (const c of postComments) {
         if (c.from?.id === FB_PAGE_ID) continue;
-        if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
+        if (state.answered.includes(c.id) || state.discarded.includes(c.id)) { console.log(`[autoReplyFB] Skip ${c.id}: ya respondido en DB`); continue; }
         const replies = c.comments?.data || [];
         const answeredByMe = replies.some(rep => rep.from?.id === FB_PAGE_ID);
-        if (answeredByMe) continue;
+        if (answeredByMe) { console.log(`[autoReplyFB] Skip ${c.id}: ya tiene reply en FB`); continue; }
         if (!matchesInfoKeyword(c.message || '')) continue;
 
+        console.log(`[autoReplyFB] Keyword match! id=${c.id} msg="${c.message}"`);
         const reply = INFO_REPLIES[Math.floor(Math.random() * INFO_REPLIES.length)];
         const replyRes = await fetch(`https://graph.facebook.com/v19.0/${c.id}/comments?access_token=${FB_TOKEN}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ message: reply })
         });
+        const replyData = await replyRes.json();
         if (replyRes.ok) {
           await markAnswered(c.id, c.message, reply, post.message || '', 'ai');
           console.log(`[autoReplyFB] Respondido ${c.id}: "${reply}"`);
           respondidos++;
+        } else {
+          console.error(`[autoReplyFB] Error respondiendo ${c.id}:`, JSON.stringify(replyData));
         }
       }
     }
@@ -789,6 +798,11 @@ async function autoReplyFB() {
     console.error('[autoReplyFB] Error:', e.message);
   }
 }
+
+app.get('/admin/run-autoreplyfb', async (req, res) => {
+  await autoReplyFB();
+  res.json({ ok: true });
+});
 
 const PORT = process.env.PORT || 3000;
 if (require.main === module) {
