@@ -1,4 +1,4 @@
-// v36
+// v37
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -76,7 +76,7 @@ async function initDB() {
   } else {
     console.log('initDB: columna categoria ya existe.');
   }
-  console.log('DB lista - v36 - ' + new Date().toISOString());
+  console.log('DB lista - v37 - ' + new Date().toISOString());
 }
 
 async function getState() {
@@ -755,7 +755,7 @@ async function autoReplyFB() {
   try {
     console.log('[autoReplyFB] Iniciando chequeo automático...');
     const state = await getState();
-    const postsUrl = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time&limit=20&access_token=${FB_TOKEN}`;
+    const postsUrl = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time&limit=50&access_token=${FB_TOKEN}`;
     const r = await fetch(postsUrl);
     const data = await r.json();
     if (!r.ok || !data.data) {
