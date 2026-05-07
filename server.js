@@ -548,59 +548,9 @@ async function fetchIGMediaComments(mediaId, token) {
 }
 
 app.get('/ig/comments', async (req, res) => {
-  try {
-    if (!IG_USER_ID || !IG_TOKEN) return res.status(500).json({ error: 'IG no configurado' });
-    const { after } = req.query;
-    const state = await getState();
-    const comments = [];
-    const seenIds = new Set();
-    let mediaUrl = `https://graph.instagram.com/v19.0/${IG_USER_ID}/media?fields=id,caption,timestamp,media_type&limit=20&access_token=${IG_TOKEN}`;
-    if (after) mediaUrl += `&after=${after}`;
-    let pagesChecked = 0;
-    const MAX_PAGES = 5;
-    let nextCursor = null;
-
-    while (mediaUrl && pagesChecked < MAX_PAGES) {
-      const r = await fetch(mediaUrl);
-      const data = await r.json();
-      if (!r.ok) {
-        console.error('IG error:', JSON.stringify(data));
-        return res.status(500).json({ error: data.error?.message || 'Error de Instagram' });
-      }
-
-      const medias = (data.data || []).filter(m => m.media_type !== 'STORY');
-      const allMediaComments = await Promise.all(medias.map(media => fetchIGMediaComments(media.id, IG_TOKEN).then(cs => ({ media, cs }))));
-      for (const { media, cs } of allMediaComments) {
-        for (const c of cs) {
-          if (seenIds.has(c.id)) continue;
-          if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
-          seenIds.add(c.id);
-          comments.push({
-            id: c.id,
-            postId: media.id,
-            postMessage: media.caption || '',
-            text: c.text,
-            author: c.username || 'Usuario',
-            authorPhoto: null,
-            publishedAt: c.timestamp,
-            network: 'ig'
-          });
-        }
-      }
-
-      nextCursor = data.paging?.cursors?.after || null;
-      mediaUrl = data.paging?.next || null;
-      pagesChecked++;
-    }
-
-    comments.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
-    const top20 = comments.slice(0, 20);
-    console.log(`[ig/comments] ${comments.length} encontrados en ${pagesChecked} página(s), devolviendo ${top20.length}`);
-    res.json({ comments: top20, nextCursor });
-  } catch (e) {
-    console.error('ig/comments error:', e.message);
-    res.status(500).json({ error: e.message });
-  }
+  // DESACTIVADO temporalmente — la integración IG está en revisión
+  console.log('[ig/comments] endpoint desactivado temporalmente');
+  res.json({ comments: [], nextCursor: null });
 });
 
 app.get('/ig/test-fb', async (req, res) => {
@@ -631,35 +581,9 @@ app.get('/ig/test-fb', async (req, res) => {
 });
 
 app.post('/ig/comments/:id/reply', async (req, res) => {
-  const { id } = req.params;
-  const { text, commentText } = req.body;
-  console.log(`[ig/reply] id=${id} text="${text}"`);
-  try {
-    if (!IG_TOKEN) return res.status(500).json({ error: 'IG no configurado' });
-    const replyRes = await fetch(
-      `https://graph.instagram.com/v19.0/${id}/replies?access_token=${IG_TOKEN}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text })
-      }
-    );
-    const replyData = await replyRes.json();
-    if (!replyRes.ok) {
-      console.error('[ig/reply] error:', JSON.stringify(replyData));
-      return res.status(500).json({ error: replyData.error?.message || 'Error al responder' });
-    }
-    const source = req.body.userEdited ? 'javi' : 'ai';
-    await markAnswered(id, commentText || '', text, req.body.postMessage || '', source);
-    console.log(`[ig/reply] ok. source=${source}`);
-    if (source === 'javi' && commentText) {
-      clasificarComentario(commentText).then(cat => actualizarCategoria(id, cat)).catch(() => {});
-    }
-    res.json({ ok: true });
-  } catch (e) {
-    console.error('[ig/reply] ERROR:', e.message);
-    res.status(500).json({ error: e.message });
-  }
+  // DESACTIVADO temporalmente — la integración IG está en revisión
+  console.log('[ig/reply] endpoint desactivado temporalmente');
+  res.json({ ok: false, error: 'Instagram temporalmente desactivado' });
 });
 
 const makeComments = [];
