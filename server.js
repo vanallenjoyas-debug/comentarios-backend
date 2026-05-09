@@ -433,9 +433,9 @@ const FB_PAGE_ID = (process.env.FB_PAGE_ID || '').trim();
 const IG_USER_ID = (process.env.IG_USER_ID || '').trim();
 const IG_TOKEN = (process.env.IG_ACCESS_TOKEN || '').trim();
 
-// Trae la primera página de comentarios de un post (máximo 50)
+// Trae comentarios de un post, más nuevos primero
 async function fetchAllPostComments(postId, token) {
-  const url = `https://graph.facebook.com/v19.0/${postId}/comments?fields=id,message,from,created_time,comments{id,from}&limit=50&access_token=${token}`;
+  const url = `https://graph.facebook.com/v19.0/${postId}/comments?fields=id,message,from,created_time,comments{id,from}&limit=50&order=reverse_chronological&access_token=${token}`;
   const r = await fetch(url);
   const data = await r.json();
   if (!r.ok || !data.data) return [];
@@ -497,9 +497,9 @@ app.get('/fb/comments', async (req, res) => {
     const reelsResFB = await fetch(`https://graph.facebook.com/v19.0/${FB_PAGE_ID}/video_reels?fields=id,description,created_time&limit=50&access_token=${FB_TOKEN}`);
     const reelsDataFB = await reelsResFB.json();
     if (reelsResFB.ok && reelsDataFB.data) {
-      for (const reel of reelsDataFB.data) {
-        const reelComments = await fetchAllPostComments(reel.id, FB_TOKEN);
-        for (const c of reelComments) {
+      const allReelComments = await Promise.all(reelsDataFB.data.map(reel => fetchAllPostComments(reel.id, FB_TOKEN).then(cs => ({ reel, cs }))));
+      for (const { reel, cs } of allReelComments) {
+        for (const c of cs) {
           if (seenIds.has(c.id)) continue;
           if (new Date(c.created_time).getTime() < thirtyDaysAgo) continue;
           if (c.from?.id === FB_PAGE_ID) continue;
@@ -570,9 +570,9 @@ app.get('/fb/comments/old', async (req, res) => {
     const reelsRes = await fetch(`https://graph.facebook.com/v19.0/${FB_PAGE_ID}/video_reels?fields=id,description,created_time&limit=50&access_token=${FB_TOKEN}`);
     const reelsData = await reelsRes.json();
     if (reelsRes.ok && reelsData.data) {
-      for (const reel of reelsData.data) {
-        const reelComments = await fetchAllPostComments(reel.id, FB_TOKEN);
-        for (const c of reelComments) {
+      const allReelComments = await Promise.all(reelsData.data.map(reel => fetchAllPostComments(reel.id, FB_TOKEN).then(cs => ({ reel, cs }))));
+      for (const { reel, cs } of allReelComments) {
+        for (const c of cs) {
           if (seenIds.has(c.id)) continue;
           if (new Date(c.created_time).getTime() >= thirtyDaysAgo) continue;
           if (c.from?.id === FB_PAGE_ID) continue;
