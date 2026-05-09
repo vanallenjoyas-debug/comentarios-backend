@@ -1,4 +1,4 @@
-// v26
+// v38
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -76,14 +76,15 @@ async function initDB() {
   } else {
     console.log('initDB: columna categoria ya existe.');
   }
-  console.log('DB lista - v26 - ' + new Date().toISOString());
+  console.log('DB lista - v37 - ' + new Date().toISOString());
 }
 
 async function getState() {
   const res = await pool.query(`SELECT id, status FROM comment_state`);
   const answered = res.rows.filter(r => r.status === 'answered').map(r => r.id);
   const discarded = res.rows.filter(r => r.status === 'discarded').map(r => r.id);
-  return { answered, discarded };
+  const seenAuto = res.rows.filter(r => r.status === 'seen_auto').map(r => r.id);
+  return { answered, discarded, seenAuto };
 }
 
 async function markAnswered(id, commentText, replyText, videoTitle, source = 'javi') {
@@ -226,7 +227,7 @@ function requireAuth(req, res, next) {
 
 app.get('/state', async (req, res) => {
   try { res.json(await getState()); }
-  catch(e) { res.json({ answered: [], discarded: [] }); }
+  catch(e) { res.json({ answered: [], discarded: [], seenAuto: [] }); }
 });
 
 app.post('/state/answered', async (req, res) => {
@@ -249,17 +250,36 @@ app.get('/comments', requireAuth, async (req, res) => {
   try {
     const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
     const { pageToken } = req.query;
-    const [response, state] = await Promise.all([
-      youtube.commentThreads.list({
+    const state = await getState();
+
+    let allItems = [];
+    let currentPageToken = pageToken || undefined;
+    let lastNextPageToken = null;
+    const MAX_YT_PAGES = 3;
+    let pagesChecked = 0;
+
+    while (pagesChecked < MAX_YT_PAGES) {
+      const response = await youtube.commentThreads.list({
         part: 'snippet,replies',
         allThreadsRelatedToChannelId: process.env.YOUTUBE_CHANNEL_ID,
         maxResults: 50,
         order: 'time',
-        pageToken: pageToken || undefined
-      }),
-      getState()
-    ]);
-    const comments = response.data.items.map(item => {
+        pageToken: currentPageToken
+      });
+      allItems = [...allItems, ...(response.data.items || [])];
+      lastNextPageToken = response.data.nextPageToken || null;
+      pagesChecked++;
+
+      const unanswered = allItems.filter(item => {
+        const replies = item.replies?.comments || [];
+        const answeredByMe = replies.some(r => r.snippet.authorChannelId?.value === MY_CHANNEL_ID);
+        return !answeredByMe && !state.answered.includes(item.id) && !state.discarded.includes(item.id);
+      });
+      if (unanswered.length >= 20 || !lastNextPageToken) break;
+      currentPageToken = lastNextPageToken;
+    }
+
+    const comments = allItems.map(item => {
       const replies = item.replies?.comments || [];
       const answeredByMe = replies.some(r => r.snippet.authorChannelId?.value === MY_CHANNEL_ID);
       return {
@@ -276,7 +296,15 @@ app.get('/comments', requireAuth, async (req, res) => {
         network: 'yt'
       };
     });
-    res.json({ comments, nextPageToken: response.data.nextPageToken || null });
+
+    // Ordenar: primero los no respondidos más nuevos, luego los respondidos
+    comments.sort((a, b) => {
+      if (a.answered !== b.answered) return a.answered ? 1 : -1;
+      return new Date(b.publishedAt) - new Date(a.publishedAt);
+    });
+
+    console.log(`[yt/comments] ${pagesChecked} página(s), ${comments.filter(c=>!c.answered).length} sin responder`);
+    res.json({ comments, nextPageToken: lastNextPageToken });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
@@ -403,6 +431,8 @@ app.get('/video/:id/comments', requireAuth, async (req, res) => {
 
 const FB_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
 const FB_PAGE_ID = (process.env.FB_PAGE_ID || '').trim();
+const IG_USER_ID = (process.env.IG_USER_ID || '').trim();
+const IG_TOKEN = (process.env.IG_ACCESS_TOKEN || '').trim();
 
 // Trae la primera página de comentarios de un post (máximo 50)
 async function fetchAllPostComments(postId, token) {
@@ -416,44 +446,152 @@ async function fetchAllPostComments(postId, token) {
 app.get('/fb/comments', async (req, res) => {
   try {
     const { after } = req.query;
-    let url = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time&limit=20&access_token=${FB_TOKEN}`;
-    if (after) url += `&after=${after}`;
-    const r = await fetch(url);
-    const data = await r.json();
-    if (!r.ok) {
-      console.error('FB error:', JSON.stringify(data));
-      return res.status(500).json({ error: data.error?.message || 'Error de Facebook' });
-    }
     const state = await getState();
     const comments = [];
+    const seenIds = new Set();
+    let nextCursor = null;
+    let pageUrl = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time&limit=20&access_token=${FB_TOKEN}`;
+    if (after) pageUrl += `&after=${after}`;
+    let pagesChecked = 0;
+    const MAX_PAGES = 5; // máximo 100 posts por request
 
-    for (const post of (data.data || [])) {
-      if (comments.length >= 20) break;
-      const postComments = await fetchAllPostComments(post.id, FB_TOKEN);
+    const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    while (pageUrl && pagesChecked < MAX_PAGES) {
+      const r = await fetch(pageUrl);
+      const data = await r.json();
+      if (!r.ok) {
+        console.error('FB error:', JSON.stringify(data));
+        return res.status(500).json({ error: data.error?.message || 'Error de Facebook' });
+      }
 
-      for (const c of postComments) {
-        if (comments.length >= 20) break;
-        if (c.from?.id === FB_PAGE_ID) continue;
-        const replies = c.comments?.data || [];
-        const answeredByMe = replies.some(r => r.from?.id === FB_PAGE_ID);
-        if (answeredByMe) continue;
-        if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
-        comments.push({
-          id: c.id,
-          postId: post.id,
-          postMessage: post.message || '',
-          text: c.message,
-          author: c.from?.name || 'Usuario',
-          authorPhoto: `https://graph.facebook.com/${c.from?.id}/picture?type=square`,
-          publishedAt: c.created_time,
-          network: 'fb'
-        });
+      const posts = data.data || [];
+      const allPostComments = await Promise.all(posts.map(post => fetchAllPostComments(post.id, FB_TOKEN).then(cs => ({ post, cs }))));
+      for (const { post, cs } of allPostComments) {
+        for (const c of cs) {
+          if (seenIds.has(c.id)) continue;
+          if (new Date(c.created_time).getTime() < thirtyDaysAgo) continue;
+          if (c.from?.id === FB_PAGE_ID) continue;
+          const replies = c.comments?.data || [];
+          const answeredByMe = replies.some(r => r.from?.id === FB_PAGE_ID);
+          if (answeredByMe) continue;
+          if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
+          seenIds.add(c.id);
+          comments.push({
+            id: c.id,
+            postId: post.id,
+            postMessage: post.message || '',
+            text: c.message,
+            author: c.from?.name || 'Usuario',
+            authorPhoto: `https://graph.facebook.com/${c.from?.id}/picture?type=square`,
+            publishedAt: c.created_time,
+            network: 'fb'
+          });
+        }
+      }
+
+      nextCursor = data.paging?.cursors?.after || null;
+      pageUrl = data.paging?.next || null;
+      pagesChecked++;
+    }
+
+    // Agregar comentarios de reels
+    const reelsResFB = await fetch(`https://graph.facebook.com/v19.0/${FB_PAGE_ID}/video_reels?fields=id,description,created_time&limit=50&access_token=${FB_TOKEN}`);
+    const reelsDataFB = await reelsResFB.json();
+    if (reelsResFB.ok && reelsDataFB.data) {
+      for (const reel of reelsDataFB.data) {
+        const reelComments = await fetchAllPostComments(reel.id, FB_TOKEN);
+        for (const c of reelComments) {
+          if (seenIds.has(c.id)) continue;
+          if (new Date(c.created_time).getTime() < thirtyDaysAgo) continue;
+          if (c.from?.id === FB_PAGE_ID) continue;
+          const replies = c.comments?.data || [];
+          const answeredByMe = replies.some(r => r.from?.id === FB_PAGE_ID);
+          if (answeredByMe) continue;
+          if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
+          seenIds.add(c.id);
+          comments.push({
+            id: c.id,
+            postId: reel.id,
+            postMessage: reel.description || '',
+            text: c.message,
+            author: c.from?.name || 'Usuario',
+            authorPhoto: `https://graph.facebook.com/${c.from?.id}/picture?type=square`,
+            publishedAt: c.created_time,
+            network: 'fb'
+          });
+        }
       }
     }
 
-    res.json({ comments, nextCursor: data.paging?.cursors?.after || null });
+    // Ordenar por más nuevos primero y devolver los primeros 20
+    comments.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
+    const top20 = comments.slice(0, 20);
+
+    console.log(`[fb/comments] ${comments.length} encontrados en ${pagesChecked} página(s), devolviendo ${top20.length} más nuevos`);
+    res.json({ comments: top20, nextCursor });
   } catch (e) {
     console.error('fb/comments error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/fb/comments/old', async (req, res) => {
+  try {
+    const state = await getState();
+    const comments = [];
+    const seenIds = new Set();
+    let pageUrl = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time&limit=20&access_token=${FB_TOKEN}`;
+    let pagesChecked = 0;
+    const MAX_PAGES = 5;
+    const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+
+    while (pageUrl && pagesChecked < MAX_PAGES) {
+      const r = await fetch(pageUrl);
+      const data = await r.json();
+      if (!r.ok) return res.status(500).json({ error: data.error?.message || 'Error de Facebook' });
+
+      const posts = data.data || [];
+      const allPostComments = await Promise.all(posts.map(post => fetchAllPostComments(post.id, FB_TOKEN).then(cs => ({ post, cs }))));
+      for (const { post, cs } of allPostComments) {
+        for (const c of cs) {
+          if (seenIds.has(c.id)) continue;
+          if (new Date(c.created_time).getTime() >= thirtyDaysAgo) continue;
+          if (c.from?.id === FB_PAGE_ID) continue;
+          const replies = c.comments?.data || [];
+          if (replies.some(r => r.from?.id === FB_PAGE_ID)) continue;
+          if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
+          seenIds.add(c.id);
+          comments.push({ id: c.id, postId: post.id, postMessage: post.message || '', text: c.message, author: c.from?.name || 'Usuario', authorPhoto: `https://graph.facebook.com/${c.from?.id}/picture?type=square`, publishedAt: c.created_time, network: 'fb' });
+        }
+      }
+      pageUrl = data.paging?.next || null;
+      pagesChecked++;
+    }
+
+    const reelsRes = await fetch(`https://graph.facebook.com/v19.0/${FB_PAGE_ID}/video_reels?fields=id,description,created_time&limit=50&access_token=${FB_TOKEN}`);
+    const reelsData = await reelsRes.json();
+    if (reelsRes.ok && reelsData.data) {
+      for (const reel of reelsData.data) {
+        const reelComments = await fetchAllPostComments(reel.id, FB_TOKEN);
+        for (const c of reelComments) {
+          if (seenIds.has(c.id)) continue;
+          if (new Date(c.created_time).getTime() >= thirtyDaysAgo) continue;
+          if (c.from?.id === FB_PAGE_ID) continue;
+          const replies = c.comments?.data || [];
+          if (replies.some(r => r.from?.id === FB_PAGE_ID)) continue;
+          if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
+          seenIds.add(c.id);
+          comments.push({ id: c.id, postId: reel.id, postMessage: reel.description || '', text: c.message, author: c.from?.name || 'Usuario', authorPhoto: `https://graph.facebook.com/${c.from?.id}/picture?type=square`, publishedAt: c.created_time, network: 'fb' });
+        }
+      }
+    }
+
+    comments.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
+    const top20 = comments.slice(0, 20);
+    console.log(`[fb/comments/old] ${comments.length} encontrados, devolviendo ${top20.length}`);
+    res.json({ comments: top20 });
+  } catch (e) {
+    console.error('fb/comments/old error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -483,6 +621,62 @@ app.post('/fb/comments/:id/reply', async (req, res) => {
     console.error('fb reply error:', e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+async function fetchIGMediaComments(mediaId, token) {
+  const allComments = [];
+  let url = `https://graph.instagram.com/v19.0/${mediaId}/comments?fields=id,text,username,timestamp&limit=50&access_token=${token}`;
+  let page = 0;
+  const MAX_PAGES = 10;
+  while (url && page < MAX_PAGES) {
+    const r = await fetch(url);
+    const data = await r.json();
+    console.log(`[ig/fetchComments] media=${mediaId} page=${page} ok=${r.ok} count=${data.data?.length ?? 'N/A'} error=${data.error?.message || 'none'}`);
+    if (!r.ok || !data.data) break;
+    allComments.push(...data.data);
+    url = data.paging?.next || null;
+    page++;
+  }
+  return allComments;
+}
+
+app.get('/ig/comments', async (req, res) => {
+  // DESACTIVADO temporalmente — la integración IG está en revisión
+  console.log('[ig/comments] endpoint desactivado temporalmente');
+  res.json({ comments: [], nextCursor: null });
+});
+
+app.get('/ig/test-fb', async (req, res) => {
+  try {
+    // Paso 1: obtener IG Business Account ID desde la página de Facebook
+    const pageRes = await fetch(`https://graph.facebook.com/v19.0/${FB_PAGE_ID}?fields=instagram_business_account&access_token=${FB_TOKEN}`);
+    const pageData = await pageRes.json();
+    console.log('[ig/test-fb] page:', JSON.stringify(pageData));
+    const igAccountId = pageData.instagram_business_account?.id;
+    if (!igAccountId) return res.json({ error: 'No IG business account linked', pageData });
+
+    // Paso 2: traer media con ese ID
+    const mediaRes = await fetch(`https://graph.facebook.com/v19.0/${igAccountId}/media?fields=id,caption,timestamp,comments_count&limit=5&access_token=${FB_TOKEN}`);
+    const mediaData = await mediaRes.json();
+    console.log('[ig/test-fb] media:', JSON.stringify(mediaData));
+    if (!mediaData.data?.length) return res.json({ igAccountId, media: mediaData });
+
+    // Paso 3: traer comentarios del primer post
+    const firstMedia = mediaData.data[0];
+    const commentsRes = await fetch(`https://graph.facebook.com/v19.0/${firstMedia.id}/comments?fields=id,text,username,timestamp&limit=10&access_token=${FB_TOKEN}`);
+    const commentsData = await commentsRes.json();
+    console.log('[ig/test-fb] comments:', JSON.stringify(commentsData));
+
+    res.json({ igAccountId, firstMedia, comments: commentsData });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/ig/comments/:id/reply', async (req, res) => {
+  // DESACTIVADO temporalmente — la integración IG está en revisión
+  console.log('[ig/reply] endpoint desactivado temporalmente');
+  res.json({ ok: false, error: 'Instagram temporalmente desactivado' });
 });
 
 const makeComments = [];
@@ -636,10 +830,199 @@ Comentario: ${comment}`;
   }
 });
 
+const RESPUESTAS_ELOGIO = [
+  'Muchas gracias hermano, me alegro que te guste mi trabajo 💪',
+  'Muchas gracias por el apoyo bro, me alegro que te guste mi contenido 🙌',
+  'Gracias por el apoyo 🙌',
+  'Estos comentarios son los que me motivan a seguir haciendo contenido, gracias bro 🙌',
+  'Gracias bro 🙌',
+  'Muchas gracias, me pone muy feliz que te guste 💪',
+  'Gracias de verdad, un abrazo grande 🤝',
+  'Me alegro que te guste, gracias por el aguante 🔥',
+  'Muchas gracias, estos mensajes me dan energía para seguir 💪',
+  'Gracias bro, un abrazo grande desde acá 🙌'
+];
+
+const RESPUESTAS_CURSO = [
+  'Mandame un mensaje privado y te paso toda la info 👋',
+  'Por privado te mando todos los detalles 🙌',
+  'Escribime por privado y te cuento todo 👋',
+  'Mandame un privado y te cuento todo lo que necesitás saber 💪',
+  'Claro! Mandame un mp y te paso la info 😄',
+  'Por mp te paso toda la info, escribime! 🔥',
+  'Si querés más info mandame un privado y con gusto te cuento 👌',
+  'Dale, mandame un mensaje privado y te paso todo 🙌',
+  'Mandame un mo y te paso toda la info 💪',
+  'Escribime por privado bro y te cuento 🫡'
+];
+
+const RESPUESTAS_INFO = [
+  'Claro! Sobre qué necesitabas saber? 😊',
+  'Con gusto! Contame sobre qué querés info 👋',
+  'Dale! Sobre qué me estás preguntando? 🙌',
+  'Buenas! Sobre qué necesitás información? 😄',
+  'Hola! Contame, info sobre qué? 👌',
+  'Con gusto te ayudo! Sobre qué querés saber? 🙌',
+  'Hola! Info sobre qué necesitabas? 👋',
+  'Decime! Sobre qué querés más info? 😊',
+  'Buenas! Sobre qué me estás consultando? 👌',
+  'Claro! Info sobre qué necesitás? 🙌'
+];
+
+const RESPUESTAS_PRECIO = [
+  'Precio de qué exactamente? 🤔',
+  'De qué te referís con el precio? Contame',
+  'Precio de qué cosa? 👋',
+  'Sobre qué querés saber el precio? 😄',
+  'De qué necesitás precio? 🙌',
+  'Qué precio necesitás saber? 🤔',
+  'Precio de qué me estás preguntando?',
+  'Contame más, precio de qué? 👌',
+  'De qué cosa me pedís precio? 🤔',
+  'Precio de qué exactamente? Contame 👋'
+];
+
+async function clasificarParaAutoReply(text) {
+  const apiKey = (process.env.ANTHROPIC_API_KEY || '').trim();
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5',
+        max_tokens: 10,
+        messages: [{ role: 'user', content: `Clasificá este comentario de Facebook en UNA categoría. Respondé SOLO la palabra clave.
+
+REGLA MÁS IMPORTANTE: si el comentario menciona "curso", "clases", "taller", "aprender", "enseñar" o cualquier variación, la categoría es SIEMPRE "curso" sin importar qué otras palabras haya. "info sobre el curso", "precio del curso", "info del taller" → todo es "curso".
+
+Categorías:
+- curso (menciona curso, clases, taller, aprender, enseñar, "me gustaría aprender", "quiero que me enseñes", "me interesa aprender" — PRIORIDAD MÁXIMA)
+- elogio (felicitaciones, halagos, "qué bueno", "me encantó", "genial", "excelente", "qué buen video", "me gustó mucho", "sos groso", "qué crack", "muy bueno", "me encanta tu contenido", "sigue así", "qué trabajo tan lindo", aplausos, admiración)
+- info (pide información genérica sin mencionar curso ni precio — solo "info", "información", sin más contexto)
+- precio (pregunta por precio, costo, cuánto sale, cuánto cuesta — sin mencionar curso)
+- otro (chistes, preguntas técnicas, comentarios generales que no encajan en ninguna categoría anterior)
+
+Comentario: "${text.substring(0, 200)}"` }]
+      })
+    });
+    const data = await r.json();
+    const cat = (data.content?.[0]?.text || '').trim().toLowerCase().split(/\s/)[0];
+    return ['curso', 'info', 'precio', 'elogio'].includes(cat) ? cat : 'otro';
+  } catch(e) { return 'otro'; }
+}
+
+async function autoReplyFB() {
+  if (!FB_TOKEN || !FB_PAGE_ID) { console.error('[autoReplyFB] Falta FB_TOKEN o FB_PAGE_ID'); return; }
+  try {
+    console.log('[autoReplyFB] Iniciando chequeo automático...');
+    const state = await getState();
+    const postsUrl = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time&limit=50&access_token=${FB_TOKEN}`;
+    const r = await fetch(postsUrl);
+    const data = await r.json();
+    if (!r.ok || !data.data) {
+      console.error('[autoReplyFB] Error trayendo posts:', JSON.stringify(data));
+      return;
+    }
+
+    console.log(`[autoReplyFB] ${data.data.length} posts encontrados`);
+    let respondidos = 0;
+    const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
+    for (const post of data.data) {
+      const postComments = await fetchAllPostComments(post.id, FB_TOKEN);
+      console.log(`[autoReplyFB] Post ${post.id}: ${postComments.length} comentarios`);
+      for (const c of postComments) {
+        if (new Date(c.created_time).getTime() < twoHoursAgo) continue;
+        if (c.from?.id === FB_PAGE_ID) { console.log(`[autoReplyFB] Skip ${c.id}: es comentario de la página`); continue; }
+        if (state.answered.includes(c.id) || state.discarded.includes(c.id) || state.seenAuto.includes(c.id)) { console.log(`[autoReplyFB] Skip ${c.id}: ya procesado`); continue; }
+        const replies = c.comments?.data || [];
+        const answeredByMe = replies.some(rep => rep.from?.id === FB_PAGE_ID);
+        if (answeredByMe) { console.log(`[autoReplyFB] Skip ${c.id}: ya tiene reply en FB`); continue; }
+        const categoria = await clasificarParaAutoReply(c.message || '');
+        if (categoria === 'otro') {
+          await pool.query(`INSERT INTO comment_state (id, status) VALUES ($1, 'seen_auto') ON CONFLICT (id) DO NOTHING`, [c.id]);
+          console.log(`[autoReplyFB] Skip ${c.id}: categoria=otro (guardado). Texto: "${(c.message || '').substring(0, 80)}"`);
+          continue;
+        }
+
+        const banco = categoria === 'curso' ? RESPUESTAS_CURSO : categoria === 'elogio' ? RESPUESTAS_ELOGIO : categoria === 'info' ? RESPUESTAS_INFO : RESPUESTAS_PRECIO;
+        console.log(`[autoReplyFB] Match! id=${c.id} categoria=${categoria} msg="${c.message}"`);
+        const reply = banco[Math.floor(Math.random() * banco.length)];
+        const replyRes = await fetch(`https://graph.facebook.com/v19.0/${c.id}/comments?access_token=${FB_TOKEN}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: reply })
+        });
+        const replyData = await replyRes.json();
+        if (replyRes.ok) {
+          await markAnswered(c.id, c.message, reply, post.message || '', 'ai');
+          console.log(`[autoReplyFB] Respondido ${c.id}: "${reply}"`);
+          respondidos++;
+        } else {
+          console.error(`[autoReplyFB] Error respondiendo ${c.id}:`, JSON.stringify(replyData));
+        }
+      }
+    }
+    // Procesar reels
+    const reelsRes = await fetch(`https://graph.facebook.com/v19.0/${FB_PAGE_ID}/video_reels?fields=id,description,created_time&limit=50&access_token=${FB_TOKEN}`);
+    const reelsData = await reelsRes.json();
+    if (reelsRes.ok && reelsData.data) {
+      console.log(`[autoReplyFB] ${reelsData.data.length} reels encontrados`);
+      for (const reel of reelsData.data) {
+        const reelComments = await fetchAllPostComments(reel.id, FB_TOKEN);
+        console.log(`[autoReplyFB] Reel ${reel.id}: ${reelComments.length} comentarios`);
+        for (const c of reelComments) {
+          if (new Date(c.created_time).getTime() < twoHoursAgo) continue;
+          if (c.from?.id === FB_PAGE_ID) { console.log(`[autoReplyFB] Skip ${c.id}: es comentario de la página`); continue; }
+          if (state.answered.includes(c.id) || state.discarded.includes(c.id) || state.seenAuto.includes(c.id)) { console.log(`[autoReplyFB] Skip ${c.id}: ya procesado`); continue; }
+          const replies = c.comments?.data || [];
+          const answeredByMe = replies.some(rep => rep.from?.id === FB_PAGE_ID);
+          if (answeredByMe) { console.log(`[autoReplyFB] Skip ${c.id}: ya tiene reply en FB`); continue; }
+          const categoria = await clasificarParaAutoReply(c.message || '');
+          if (categoria === 'otro') {
+            await pool.query(`INSERT INTO comment_state (id, status) VALUES ($1, 'seen_auto') ON CONFLICT (id) DO NOTHING`, [c.id]);
+            console.log(`[autoReplyFB] Skip ${c.id}: categoria=otro (guardado). Texto: "${(c.message || '').substring(0, 80)}"`);
+            continue;
+          }
+          const banco = categoria === 'curso' ? RESPUESTAS_CURSO : categoria === 'elogio' ? RESPUESTAS_ELOGIO : categoria === 'info' ? RESPUESTAS_INFO : RESPUESTAS_PRECIO;
+          console.log(`[autoReplyFB] Match! id=${c.id} categoria=${categoria} msg="${c.message}"`);
+          const reply = banco[Math.floor(Math.random() * banco.length)];
+          const replyRes = await fetch(`https://graph.facebook.com/v19.0/${c.id}/comments?access_token=${FB_TOKEN}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: reply })
+          });
+          const replyData = await replyRes.json();
+          if (replyRes.ok) {
+            await markAnswered(c.id, c.message, reply, reel.description || '', 'ai');
+            console.log(`[autoReplyFB] Respondido reel ${c.id}: "${reply}"`);
+            respondidos++;
+          } else {
+            console.error(`[autoReplyFB] Error respondiendo reel ${c.id}:`, JSON.stringify(replyData));
+          }
+        }
+      }
+    } else {
+      console.log(`[autoReplyFB] Reels: no se pudieron traer o no hay. ${JSON.stringify(reelsData?.error || '')}`);
+    }
+
+    console.log(`[autoReplyFB] Chequeo terminado. Respondidos: ${respondidos}`);
+  } catch (e) {
+    console.error('[autoReplyFB] Error:', e.message);
+  }
+}
+
+app.get('/admin/run-autoreplyfb', async (req, res) => {
+  await autoReplyFB();
+  res.json({ ok: true });
+});
+
 const PORT = process.env.PORT || 3000;
 if (require.main === module) {
   initDB().then(() => {
     app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
+    autoReplyFB();
+    setInterval(autoReplyFB, 30 * 60 * 1000);
+    console.log('[autoReplyFB] Proceso automático iniciado — corre al iniciar y cada 30 minutos');
   }).catch(e => {
     console.error('Error iniciando DB:', e.message);
     app.listen(PORT, () => console.log(`Servidor corriendo sin DB en puerto ${PORT}`));
