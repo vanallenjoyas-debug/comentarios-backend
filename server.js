@@ -769,12 +769,12 @@ async function autoReplyFB() {
       const postComments = await fetchAllPostComments(post.id, FB_TOKEN);
       console.log(`[autoReplyFB] Post ${post.id}: ${postComments.length} comentarios`);
       for (const c of postComments) {
-        if (c.from?.id === FB_PAGE_ID) continue;
+        if (c.from?.id === FB_PAGE_ID) { console.log(`[autoReplyFB] Skip ${c.id}: es comentario de la página`); continue; }
         if (state.answered.includes(c.id) || state.discarded.includes(c.id)) { console.log(`[autoReplyFB] Skip ${c.id}: ya respondido en DB`); continue; }
         const replies = c.comments?.data || [];
         const answeredByMe = replies.some(rep => rep.from?.id === FB_PAGE_ID);
         if (answeredByMe) { console.log(`[autoReplyFB] Skip ${c.id}: ya tiene reply en FB`); continue; }
-        if (!matchesInfoKeyword(c.message || '')) continue;
+        if (!matchesInfoKeyword(c.message || '')) { console.log(`[autoReplyFB] Skip ${c.id}: no matchea keywords. Texto: "${(c.message || '').substring(0, 80)}"`); continue; }
 
         console.log(`[autoReplyFB] Keyword match! id=${c.id} msg="${c.message}"`);
         const reply = INFO_REPLIES[Math.floor(Math.random() * INFO_REPLIES.length)];
