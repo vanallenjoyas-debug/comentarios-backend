@@ -737,17 +737,69 @@ Comentario: ${comment}`;
   }
 });
 
-const INFO_KEYWORDS = ['info', 'información', 'curso', 'quiero info', 'quiero información', 'quiero hacer el curso'];
-const INFO_REPLIES = [
-  'Mandame mensaje privado y te paso toda la info 👋',
-  'Por privado te mando los detalles 🙌',
-  'Escribime por privado bro 👋',
-  'Mandame un privado y te cuento todo'
+const RESPUESTAS_CURSO = [
+  'Mandame un mensaje privado y te paso toda la info 👋',
+  'Por privado te mando todos los detalles 🙌',
+  'Escribime por privado y te cuento todo 👋',
+  'Mandame un privado y te cuento todo lo que necesitás saber 💪',
+  'Claro! Mandame un mp y te paso la info 😄',
+  'Por mp te paso toda la info, escribime! 🔥',
+  'Si querés más info mandame un privado y con gusto te cuento 👌',
+  'Dale, mandame un mensaje privado y te paso todo 🙌',
+  'Mandame un mo y te paso toda la info 💪',
+  'Escribime por privado bro y te cuento 🫡'
 ];
 
-function matchesInfoKeyword(text) {
-  const lower = text.toLowerCase();
-  return INFO_KEYWORDS.some(kw => lower.includes(kw));
+const RESPUESTAS_INFO = [
+  'Info sobre qué necesitás? 🤔',
+  'Contame más, sobre qué querés info?',
+  'Dale, info sobre qué te referís? 👋',
+  'Info de qué me estás preguntando? 😄',
+  'Sobre qué necesitás información? 🙌',
+  'Qué info necesitás exactamente?',
+  'Contame, sobre qué necesitás info? 👌',
+  'Info de qué cosa? Contame 🤔',
+  'De qué querés info exactamente?',
+  'Sobre qué te puedo pasar info? 👋'
+];
+
+const RESPUESTAS_PRECIO = [
+  'Precio de qué exactamente? 🤔',
+  'De qué te referís con el precio? Contame',
+  'Precio de qué cosa? 👋',
+  'Sobre qué querés saber el precio? 😄',
+  'De qué necesitás precio? 🙌',
+  'Qué precio necesitás saber? 🤔',
+  'Precio de qué me estás preguntando?',
+  'Contame más, precio de qué? 👌',
+  'De qué cosa me pedís precio? 🤔',
+  'Precio de qué exactamente? Contame 👋'
+];
+
+async function clasificarParaAutoReply(text) {
+  const apiKey = (process.env.ANTHROPIC_API_KEY || '').trim();
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5',
+        max_tokens: 10,
+        messages: [{ role: 'user', content: `Clasificá este comentario de Facebook en UNA categoría. Respondé SOLO la palabra clave.
+
+Categorías:
+- curso (preguntan por cursos, clases, talleres, quieren aprender joyería, "me gustaría aprender", "enseñás", "tienen clases", "quiero que me enseñes", "me interesa aprender")
+- info (piden información genérica sin especificar curso ni precio — "info", "información", "quiero saber más", sin contexto claro)
+- precio (preguntan por precio, costo, cuánto sale, cuánto cuesta)
+- otro (cualquier otra cosa — elogios, chistes, comentarios generales)
+
+Comentario: "${text.substring(0, 200)}"` }]
+      })
+    });
+    const data = await r.json();
+    const cat = (data.content?.[0]?.text || '').trim().toLowerCase().split(/\s/)[0];
+    return ['curso', 'info', 'precio'].includes(cat) ? cat : 'otro';
+  } catch(e) { return 'otro'; }
 }
 
 async function autoReplyFB() {
@@ -774,10 +826,12 @@ async function autoReplyFB() {
         const replies = c.comments?.data || [];
         const answeredByMe = replies.some(rep => rep.from?.id === FB_PAGE_ID);
         if (answeredByMe) { console.log(`[autoReplyFB] Skip ${c.id}: ya tiene reply en FB`); continue; }
-        if (!matchesInfoKeyword(c.message || '')) { console.log(`[autoReplyFB] Skip ${c.id}: no matchea keywords. Texto: "${(c.message || '').substring(0, 80)}"`); continue; }
+        const categoria = await clasificarParaAutoReply(c.message || '');
+        if (categoria === 'otro') { console.log(`[autoReplyFB] Skip ${c.id}: categoria=otro. Texto: "${(c.message || '').substring(0, 80)}"`); continue; }
 
-        console.log(`[autoReplyFB] Keyword match! id=${c.id} msg="${c.message}"`);
-        const reply = INFO_REPLIES[Math.floor(Math.random() * INFO_REPLIES.length)];
+        const banco = categoria === 'curso' ? RESPUESTAS_CURSO : categoria === 'info' ? RESPUESTAS_INFO : RESPUESTAS_PRECIO;
+        console.log(`[autoReplyFB] Match! id=${c.id} categoria=${categoria} msg="${c.message}"`);
+        const reply = banco[Math.floor(Math.random() * banco.length)];
         const replyRes = await fetch(`https://graph.facebook.com/v19.0/${c.id}/comments?access_token=${FB_TOKEN}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
