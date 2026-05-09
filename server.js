@@ -83,8 +83,7 @@ async function getState() {
   const res = await pool.query(`SELECT id, status FROM comment_state`);
   const answered = res.rows.filter(r => r.status === 'answered').map(r => r.id);
   const discarded = res.rows.filter(r => r.status === 'discarded').map(r => r.id);
-  const seenAuto = res.rows.filter(r => r.status === 'seen_auto').map(r => r.id);
-  return { answered, discarded, seenAuto };
+  return { answered, discarded };
 }
 
 async function markAnswered(id, commentText, replyText, videoTitle, source = 'javi') {
@@ -227,7 +226,7 @@ function requireAuth(req, res, next) {
 
 app.get('/state', async (req, res) => {
   try { res.json(await getState()); }
-  catch(e) { res.json({ answered: [], discarded: [], seenAuto: [] }); }
+  catch(e) { res.json({ answered: [], discarded: [] }); }
 });
 
 app.post('/state/answered', async (req, res) => {
@@ -830,199 +829,10 @@ Comentario: ${comment}`;
   }
 });
 
-const RESPUESTAS_ELOGIO = [
-  'Muchas gracias hermano, me alegro que te guste mi trabajo 💪',
-  'Muchas gracias por el apoyo bro, me alegro que te guste mi contenido 🙌',
-  'Gracias por el apoyo 🙌',
-  'Estos comentarios son los que me motivan a seguir haciendo contenido, gracias bro 🙌',
-  'Gracias bro 🙌',
-  'Muchas gracias, me pone muy feliz que te guste 💪',
-  'Gracias de verdad, un abrazo grande 🤝',
-  'Me alegro que te guste, gracias por el aguante 🔥',
-  'Muchas gracias, estos mensajes me dan energía para seguir 💪',
-  'Gracias bro, un abrazo grande desde acá 🙌'
-];
-
-const RESPUESTAS_CURSO = [
-  'Mandame un mensaje privado y te paso toda la info 👋',
-  'Por privado te mando todos los detalles 🙌',
-  'Escribime por privado y te cuento todo 👋',
-  'Mandame un privado y te cuento todo lo que necesitás saber 💪',
-  'Claro! Mandame un mp y te paso la info 😄',
-  'Por mp te paso toda la info, escribime! 🔥',
-  'Si querés más info mandame un privado y con gusto te cuento 👌',
-  'Dale, mandame un mensaje privado y te paso todo 🙌',
-  'Mandame un mo y te paso toda la info 💪',
-  'Escribime por privado bro y te cuento 🫡'
-];
-
-const RESPUESTAS_INFO = [
-  'Claro! Sobre qué necesitabas saber? 😊',
-  'Con gusto! Contame sobre qué querés info 👋',
-  'Dale! Sobre qué me estás preguntando? 🙌',
-  'Buenas! Sobre qué necesitás información? 😄',
-  'Hola! Contame, info sobre qué? 👌',
-  'Con gusto te ayudo! Sobre qué querés saber? 🙌',
-  'Hola! Info sobre qué necesitabas? 👋',
-  'Decime! Sobre qué querés más info? 😊',
-  'Buenas! Sobre qué me estás consultando? 👌',
-  'Claro! Info sobre qué necesitás? 🙌'
-];
-
-const RESPUESTAS_PRECIO = [
-  'Precio de qué exactamente? 🤔',
-  'De qué te referís con el precio? Contame',
-  'Precio de qué cosa? 👋',
-  'Sobre qué querés saber el precio? 😄',
-  'De qué necesitás precio? 🙌',
-  'Qué precio necesitás saber? 🤔',
-  'Precio de qué me estás preguntando?',
-  'Contame más, precio de qué? 👌',
-  'De qué cosa me pedís precio? 🤔',
-  'Precio de qué exactamente? Contame 👋'
-];
-
-async function clasificarParaAutoReply(text) {
-  const apiKey = (process.env.ANTHROPIC_API_KEY || '').trim();
-  try {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5',
-        max_tokens: 10,
-        messages: [{ role: 'user', content: `Clasificá este comentario de Facebook en UNA categoría. Respondé SOLO la palabra clave.
-
-REGLA MÁS IMPORTANTE: si el comentario menciona "curso", "clases", "taller", "aprender", "enseñar" o cualquier variación, la categoría es SIEMPRE "curso" sin importar qué otras palabras haya. "info sobre el curso", "precio del curso", "info del taller" → todo es "curso".
-
-Categorías:
-- curso (menciona curso, clases, taller, aprender, enseñar, "me gustaría aprender", "quiero que me enseñes", "me interesa aprender" — PRIORIDAD MÁXIMA)
-- elogio (felicitaciones, halagos, "qué bueno", "me encantó", "genial", "excelente", "qué buen video", "me gustó mucho", "sos groso", "qué crack", "muy bueno", "me encanta tu contenido", "sigue así", "qué trabajo tan lindo", aplausos, admiración)
-- info (pide información genérica sin mencionar curso ni precio — solo "info", "información", sin más contexto)
-- precio (pregunta por precio, costo, cuánto sale, cuánto cuesta — sin mencionar curso)
-- otro (chistes, preguntas técnicas, comentarios generales que no encajan en ninguna categoría anterior)
-
-Comentario: "${text.substring(0, 200)}"` }]
-      })
-    });
-    const data = await r.json();
-    const cat = (data.content?.[0]?.text || '').trim().toLowerCase().split(/\s/)[0];
-    return ['curso', 'info', 'precio', 'elogio'].includes(cat) ? cat : 'otro';
-  } catch(e) { return 'otro'; }
-}
-
-async function autoReplyFB() {
-  if (!FB_TOKEN || !FB_PAGE_ID) { console.error('[autoReplyFB] Falta FB_TOKEN o FB_PAGE_ID'); return; }
-  try {
-    console.log('[autoReplyFB] Iniciando chequeo automático...');
-    const state = await getState();
-    const postsUrl = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time&limit=50&access_token=${FB_TOKEN}`;
-    const r = await fetch(postsUrl);
-    const data = await r.json();
-    if (!r.ok || !data.data) {
-      console.error('[autoReplyFB] Error trayendo posts:', JSON.stringify(data));
-      return;
-    }
-
-    console.log(`[autoReplyFB] ${data.data.length} posts encontrados`);
-    let respondidos = 0;
-    const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
-    for (const post of data.data) {
-      const postComments = await fetchAllPostComments(post.id, FB_TOKEN);
-      console.log(`[autoReplyFB] Post ${post.id}: ${postComments.length} comentarios`);
-      for (const c of postComments) {
-        if (new Date(c.created_time).getTime() < twoHoursAgo) continue;
-        if (c.from?.id === FB_PAGE_ID) { console.log(`[autoReplyFB] Skip ${c.id}: es comentario de la página`); continue; }
-        if (state.answered.includes(c.id) || state.discarded.includes(c.id) || state.seenAuto.includes(c.id)) { console.log(`[autoReplyFB] Skip ${c.id}: ya procesado`); continue; }
-        const replies = c.comments?.data || [];
-        const answeredByMe = replies.some(rep => rep.from?.id === FB_PAGE_ID);
-        if (answeredByMe) { console.log(`[autoReplyFB] Skip ${c.id}: ya tiene reply en FB`); continue; }
-        const categoria = await clasificarParaAutoReply(c.message || '');
-        if (categoria === 'otro') {
-          await pool.query(`INSERT INTO comment_state (id, status) VALUES ($1, 'seen_auto') ON CONFLICT (id) DO NOTHING`, [c.id]);
-          console.log(`[autoReplyFB] Skip ${c.id}: categoria=otro (guardado). Texto: "${(c.message || '').substring(0, 80)}"`);
-          continue;
-        }
-
-        const banco = categoria === 'curso' ? RESPUESTAS_CURSO : categoria === 'elogio' ? RESPUESTAS_ELOGIO : categoria === 'info' ? RESPUESTAS_INFO : RESPUESTAS_PRECIO;
-        console.log(`[autoReplyFB] Match! id=${c.id} categoria=${categoria} msg="${c.message}"`);
-        const reply = banco[Math.floor(Math.random() * banco.length)];
-        const replyRes = await fetch(`https://graph.facebook.com/v19.0/${c.id}/comments?access_token=${FB_TOKEN}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: reply })
-        });
-        const replyData = await replyRes.json();
-        if (replyRes.ok) {
-          await markAnswered(c.id, c.message, reply, post.message || '', 'ai');
-          console.log(`[autoReplyFB] Respondido ${c.id}: "${reply}"`);
-          respondidos++;
-        } else {
-          console.error(`[autoReplyFB] Error respondiendo ${c.id}:`, JSON.stringify(replyData));
-        }
-      }
-    }
-    // Procesar reels
-    const reelsRes = await fetch(`https://graph.facebook.com/v19.0/${FB_PAGE_ID}/video_reels?fields=id,description,created_time&limit=50&access_token=${FB_TOKEN}`);
-    const reelsData = await reelsRes.json();
-    if (reelsRes.ok && reelsData.data) {
-      console.log(`[autoReplyFB] ${reelsData.data.length} reels encontrados`);
-      for (const reel of reelsData.data) {
-        const reelComments = await fetchAllPostComments(reel.id, FB_TOKEN);
-        console.log(`[autoReplyFB] Reel ${reel.id}: ${reelComments.length} comentarios`);
-        for (const c of reelComments) {
-          if (new Date(c.created_time).getTime() < twoHoursAgo) continue;
-          if (c.from?.id === FB_PAGE_ID) { console.log(`[autoReplyFB] Skip ${c.id}: es comentario de la página`); continue; }
-          if (state.answered.includes(c.id) || state.discarded.includes(c.id) || state.seenAuto.includes(c.id)) { console.log(`[autoReplyFB] Skip ${c.id}: ya procesado`); continue; }
-          const replies = c.comments?.data || [];
-          const answeredByMe = replies.some(rep => rep.from?.id === FB_PAGE_ID);
-          if (answeredByMe) { console.log(`[autoReplyFB] Skip ${c.id}: ya tiene reply en FB`); continue; }
-          const categoria = await clasificarParaAutoReply(c.message || '');
-          if (categoria === 'otro') {
-            await pool.query(`INSERT INTO comment_state (id, status) VALUES ($1, 'seen_auto') ON CONFLICT (id) DO NOTHING`, [c.id]);
-            console.log(`[autoReplyFB] Skip ${c.id}: categoria=otro (guardado). Texto: "${(c.message || '').substring(0, 80)}"`);
-            continue;
-          }
-          const banco = categoria === 'curso' ? RESPUESTAS_CURSO : categoria === 'elogio' ? RESPUESTAS_ELOGIO : categoria === 'info' ? RESPUESTAS_INFO : RESPUESTAS_PRECIO;
-          console.log(`[autoReplyFB] Match! id=${c.id} categoria=${categoria} msg="${c.message}"`);
-          const reply = banco[Math.floor(Math.random() * banco.length)];
-          const replyRes = await fetch(`https://graph.facebook.com/v19.0/${c.id}/comments?access_token=${FB_TOKEN}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: reply })
-          });
-          const replyData = await replyRes.json();
-          if (replyRes.ok) {
-            await markAnswered(c.id, c.message, reply, reel.description || '', 'ai');
-            console.log(`[autoReplyFB] Respondido reel ${c.id}: "${reply}"`);
-            respondidos++;
-          } else {
-            console.error(`[autoReplyFB] Error respondiendo reel ${c.id}:`, JSON.stringify(replyData));
-          }
-        }
-      }
-    } else {
-      console.log(`[autoReplyFB] Reels: no se pudieron traer o no hay. ${JSON.stringify(reelsData?.error || '')}`);
-    }
-
-    console.log(`[autoReplyFB] Chequeo terminado. Respondidos: ${respondidos}`);
-  } catch (e) {
-    console.error('[autoReplyFB] Error:', e.message);
-  }
-}
-
-app.get('/admin/run-autoreplyfb', async (req, res) => {
-  await autoReplyFB();
-  res.json({ ok: true });
-});
-
 const PORT = process.env.PORT || 3000;
 if (require.main === module) {
   initDB().then(() => {
     app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
-    autoReplyFB();
-    setInterval(autoReplyFB, 30 * 60 * 1000);
-    console.log('[autoReplyFB] Proceso automático iniciado — corre al iniciar y cada 30 minutos');
   }).catch(e => {
     console.error('Error iniciando DB:', e.message);
     app.listen(PORT, () => console.log(`Servidor corriendo sin DB en puerto ${PORT}`));
