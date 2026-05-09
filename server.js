@@ -834,10 +834,12 @@ async function autoReplyFB() {
 
     console.log(`[autoReplyFB] ${data.data.length} posts encontrados`);
     let respondidos = 0;
+    const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
     for (const post of data.data) {
       const postComments = await fetchAllPostComments(post.id, FB_TOKEN);
       console.log(`[autoReplyFB] Post ${post.id}: ${postComments.length} comentarios`);
       for (const c of postComments) {
+        if (new Date(c.created_time).getTime() < twoHoursAgo) continue;
         if (c.from?.id === FB_PAGE_ID) { console.log(`[autoReplyFB] Skip ${c.id}: es comentario de la página`); continue; }
         if (state.answered.includes(c.id) || state.discarded.includes(c.id) || state.seenAuto.includes(c.id)) { console.log(`[autoReplyFB] Skip ${c.id}: ya procesado`); continue; }
         const replies = c.comments?.data || [];
@@ -879,6 +881,7 @@ async function autoReplyFB() {
         const reelComments = await fetchAllPostComments(reel.id, FB_TOKEN);
         console.log(`[autoReplyFB] Reel ${reel.id}: ${reelComments.length} comentarios`);
         for (const c of reelComments) {
+          if (new Date(c.created_time).getTime() < twoHoursAgo) continue;
           if (c.from?.id === FB_PAGE_ID) { console.log(`[autoReplyFB] Skip ${c.id}: es comentario de la página`); continue; }
           if (state.answered.includes(c.id) || state.discarded.includes(c.id) || state.seenAuto.includes(c.id)) { console.log(`[autoReplyFB] Skip ${c.id}: ya procesado`); continue; }
           const replies = c.comments?.data || [];
