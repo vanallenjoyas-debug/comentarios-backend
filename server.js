@@ -751,16 +751,16 @@ const RESPUESTAS_CURSO = [
 ];
 
 const RESPUESTAS_INFO = [
-  'Info sobre qué necesitás? 🤔',
-  'Contame más, sobre qué querés info?',
-  'Dale, info sobre qué te referís? 👋',
-  'Info de qué me estás preguntando? 😄',
-  'Sobre qué necesitás información? 🙌',
-  'Qué info necesitás exactamente?',
-  'Contame, sobre qué necesitás info? 👌',
-  'Info de qué cosa? Contame 🤔',
-  'De qué querés info exactamente?',
-  'Sobre qué te puedo pasar info? 👋'
+  'Claro! Sobre qué necesitabas saber? 😊',
+  'Con gusto! Contame sobre qué querés info 👋',
+  'Dale! Sobre qué me estás preguntando? 🙌',
+  'Buenas! Sobre qué necesitás información? 😄',
+  'Hola! Contame, info sobre qué? 👌',
+  'Con gusto te ayudo! Sobre qué querés saber? 🙌',
+  'Hola! Info sobre qué necesitabas? 👋',
+  'Decime! Sobre qué querés más info? 😊',
+  'Buenas! Sobre qué me estás consultando? 👌',
+  'Claro! Info sobre qué necesitás? 🙌'
 ];
 
 const RESPUESTAS_PRECIO = [
@@ -787,11 +787,13 @@ async function clasificarParaAutoReply(text) {
         max_tokens: 10,
         messages: [{ role: 'user', content: `Clasificá este comentario de Facebook en UNA categoría. Respondé SOLO la palabra clave.
 
+REGLA MÁS IMPORTANTE: si el comentario menciona "curso", "clases", "taller", "aprender", "enseñar" o cualquier variación, la categoría es SIEMPRE "curso" sin importar qué otras palabras haya. "info sobre el curso", "precio del curso", "info del taller" → todo es "curso".
+
 Categorías:
-- curso (preguntan por cursos, clases, talleres, quieren aprender joyería, "me gustaría aprender", "enseñás", "tienen clases", "quiero que me enseñes", "me interesa aprender")
-- info (piden información genérica sin especificar curso ni precio — "info", "información", "quiero saber más", sin contexto claro)
-- precio (preguntan por precio, costo, cuánto sale, cuánto cuesta)
-- otro (cualquier otra cosa — elogios, chistes, comentarios generales)
+- curso (menciona curso, clases, taller, aprender, enseñar, "me gustaría aprender", "quiero que me enseñes", "me interesa aprender" — PRIORIDAD MÁXIMA)
+- info (pide información genérica sin mencionar curso ni precio — solo "info", "información", sin más contexto)
+- precio (pregunta por precio, costo, cuánto sale, cuánto cuesta — sin mencionar curso)
+- otro (elogios, chistes, comentarios generales, cualquier otra cosa)
 
 Comentario: "${text.substring(0, 200)}"` }]
       })
