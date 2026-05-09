@@ -1,4 +1,4 @@
-// v37
+// v38
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -227,7 +227,7 @@ function requireAuth(req, res, next) {
 
 app.get('/state', async (req, res) => {
   try { res.json(await getState()); }
-  catch(e) { res.json({ answered: [], discarded: [] }); }
+  catch(e) { res.json({ answered: [], discarded: [], seenAuto: [] }); }
 });
 
 app.post('/state/answered', async (req, res) => {
@@ -815,7 +815,7 @@ Comentario: "${text.substring(0, 200)}"` }]
     });
     const data = await r.json();
     const cat = (data.content?.[0]?.text || '').trim().toLowerCase().split(/\s/)[0];
-    return ['curso', 'info', 'precio'].includes(cat) ? cat : 'otro';
+    return ['curso', 'info', 'precio', 'elogio'].includes(cat) ? cat : 'otro';
   } catch(e) { return 'otro'; }
 }
 
@@ -846,8 +846,6 @@ async function autoReplyFB() {
         const answeredByMe = replies.some(rep => rep.from?.id === FB_PAGE_ID);
         if (answeredByMe) { console.log(`[autoReplyFB] Skip ${c.id}: ya tiene reply en FB`); continue; }
         const categoria = await clasificarParaAutoReply(c.message || '');
-        if (categoria === 'otro') { console.log(`[autoReplyFB] Skip ${c.id}: categoria=otro. Texto: "${(c.message || '').substring(0, 80)}"`); continue; }
-
         if (categoria === 'otro') {
           await pool.query(`INSERT INTO comment_state (id, status) VALUES ($1, 'seen_auto') ON CONFLICT (id) DO NOTHING`, [c.id]);
           console.log(`[autoReplyFB] Skip ${c.id}: categoria=otro (guardado). Texto: "${(c.message || '').substring(0, 80)}"`);
