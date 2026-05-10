@@ -1,9 +1,10 @@
-// v38
+// v39 - AGENTE AUTÓNOMO
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
 const session = require('express-session');
 const { Pool } = require('pg');
+const agent = require('./agent');
 
 const app = express();
 
@@ -829,14 +830,150 @@ Comentario: ${comment}`;
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// ENDPOINTS DEL AGENTE AUTÓNOMO
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Disparar ciclo manualmente (también lo llama el cron)
+app.post('/agent/run', async (req, res) => {
+  const network = req.body?.network || 'fb';
+  console.log(`[agent/run] disparado manualmente - network: ${network}`);
+  try {
+    const result = await agent.runAgent(network);
+    res.json({ ok: true, ...result });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// Estado y estadísticas del agente
+app.get('/agent/stats', async (req, res) => {
+  try {
+    const stats = await agent.getAgentStats();
+    res.json(stats);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Cola de revisión pendiente
+app.get('/agent/queue', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT * FROM review_queue 
+      WHERE status = 'pending' 
+      ORDER BY confidence DESC, created_at DESC
+    `);
+    res.json({ queue: result.rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 👍 Aprobar respuesta — postea en FB y aprende
+app.post('/agent/approve', async (req, res) => {
+  const { commentId, replyText } = req.body;
+  if (!commentId || !replyText) return res.status(400).json({ error: 'Faltan datos' });
+  try {
+    await agent.approveReply(commentId, replyText);
+    res.json({ ok: true, learned: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 👎 Rechazar — genera 3 variaciones nuevas
+app.post('/agent/reject', async (req, res) => {
+  const { commentId } = req.body;
+  if (!commentId) return res.status(400).json({ error: 'Falta commentId' });
+  try {
+    const variations = await agent.rejectAndRegenerate(commentId);
+    res.json({ ok: true, variations });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Descartar un comentario de la cola (spam, irrelevante)
+app.post('/agent/discard', async (req, res) => {
+  const { commentId } = req.body;
+  if (!commentId) return res.status(400).json({ error: 'Falta commentId' });
+  try {
+    await pool.query(`UPDATE review_queue SET status = 'discarded' WHERE id = $1`, [commentId]);
+    await markDiscarded(commentId);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Historial de runs del agente
+app.get('/agent/runs', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT * FROM agent_runs ORDER BY started_at DESC LIMIT 20
+    `);
+    res.json({ runs: result.rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Test de conexión Telegram
+app.post('/agent/telegram-test', async (req, res) => {
+  try {
+    await agent.sendTelegram('🤖 Conexión con el agente de comentarios OK. Todo funcionando.');
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CRON INTERNO — cada 2 horas corre el agente automáticamente
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function startCron() {
+  const TWO_HOURS = 2 * 60 * 60 * 1000;
+
+  const runCycle = async () => {
+    try {
+      console.log('[cron] ▶ ciclo automático iniciado');
+      await agent.runAgent('fb');
+    } catch (e) {
+      console.error('[cron] error en ciclo:', e.message);
+    }
+  };
+
+  // Primera corrida 2 minutos después de iniciar (no en el arranque para evitar problemas)
+  setTimeout(() => {
+    runCycle();
+    setInterval(runCycle, TWO_HOURS);
+  }, 2 * 60 * 1000);
+
+  console.log('[cron] programado — primer ciclo en 2 minutos, luego cada 2 horas');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STARTUP
+// ═══════════════════════════════════════════════════════════════════════════════
+
 const PORT = process.env.PORT || 3000;
 if (require.main === module) {
-  initDB().then(() => {
-    app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
-  }).catch(e => {
-    console.error('Error iniciando DB:', e.message);
-    app.listen(PORT, () => console.log(`Servidor corriendo sin DB en puerto ${PORT}`));
-  });
+  Promise.all([initDB(), agent.initAgentDB()])
+    .then(() => {
+      app.listen(PORT, () => {
+        console.log(`Servidor corriendo en puerto ${PORT}`);
+        startCron();
+      });
+    })
+    .catch(e => {
+      console.error('Error iniciando DB:', e.message);
+      app.listen(PORT, () => {
+        console.log(`Servidor corriendo sin DB en puerto ${PORT}`);
+        startCron();
+      });
+    });
 }
 
 module.exports = { app, initDB, getState, markAnswered, markDiscarded, getExamples };
