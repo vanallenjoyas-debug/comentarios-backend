@@ -173,6 +173,21 @@ async function getLearnedExamples(postId, comentario, limit = 15) {
   }).slice(0, limit);
 }
 
+// ─── SELECCIÓN DE MODELO ──────────────────────────────────────────────────────
+// Haiku para el 90% (barato) — Sonnet solo para casos técnicos o complejos
+
+function selectModel(comment, postContext) {
+  const text = comment.toLowerCase();
+  const needsSonnet =
+    comment.length > 150 ||
+    (text.split('?').length - 1) >= 2 ||
+    /como|por que|cuanto|temperatura|acido|acido|proceso|refinad|pureza|aleacion|quilate|karat|formula|electro|voltaje|densidad|fundicion/.test(text) ||
+    (postContext && postContext.content_type === 'proceso_quimico' && text.includes('?'));
+  const model = needsSonnet ? 'claude-sonnet-4-20250514' : 'claude-haiku-4-5';
+  console.log('[agent] modelo:', model, '| chars:', comment.length);
+  return model;
+}
+
 // ─── GENERADOR DE RESPUESTA ───────────────────────────────────────────────────
 
 async function generateReply(comment, postContext, examples) {
@@ -211,7 +226,7 @@ Comentario a responder: "${comment}"`;
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
+        model: selectModel(comment, postContext),
         max_tokens: 150,
         messages: [{ role: 'user', content: prompt }]
       })
