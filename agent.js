@@ -261,6 +261,8 @@ REGLAS:
 - Saludo desde otro país → variación de "me alegro que te guste el contenido, abrazo grande"
 - Si el post es sobre una técnica específica y el comentario da consejos no pedidos → responder con humor breve sin invalidar al usuario
 
+- IDIOMA: detectá el idioma del comentario y respondé EN ESE MISMO IDIOMA. Si no es español, usá respuestas muy genéricas y cortas (ej: inglés → "thanks so much! 🙌", portugués → "obrigado! 💪", italiano → "grazie mille! 😄"). Nunca respondas en español a un comentario en otro idioma.
+
 INSTRUCCIÓN: UNA SOLA respuesta lista para publicar, sin comillas ni explicaciones.
 Comentario: ${comment}`;
 
