@@ -1042,17 +1042,61 @@ app.post('/agent/faq/match', async (req, res) => {
 // Historial de lo que auto-respondió el agente
 app.get('/agent/history', async (req, res) => {
   try {
+    // unrated=1 solo trae las sin calificar (para el historial de revisión)
+    const unratedOnly = req.query.unrated === '1';
+    const whereClause = unratedOnly 
+      ? "WHERE source = 'ai'" 
+      : "WHERE source IN ('ai','ai_rated_ok','ai_rated_fix')";
     const result = await pool.query(`
       SELECT id, comment_text, reply_text, video_title, created_at
       FROM comment_state
-      WHERE source = 'ai'
+      ${whereClause}
       ORDER BY created_at DESC
-      LIMIT 50
+      LIMIT 100
     `);
     res.json({ history: result.rows });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+
+// Calificar respuesta del historial
+app.post('/agent/history/:id/rate', async (req, res) => {
+  const { id } = req.params;
+  const { rating, correction } = req.body; // rating: 'ok' | 'mejorable' | 'mal'
+  try {
+    const row = await pool.query('SELECT * FROM comment_state WHERE id = $1', [id]);
+    if (row.rows.length === 0) return res.status(404).json({ error: 'No encontrado' });
+    const item = row.rows[0];
+
+    if (rating === 'ok') {
+      // Refuerza el aprendizaje — sube peso del ejemplo
+      await pool.query(`
+        INSERT INTO reply_examples (comment_text, reply_text, post_title, network, source, approved_at)
+        VALUES ($1, $2, $3, 'fb', 'agente', NOW())
+        ON CONFLICT DO NOTHING
+      `, [item.comment_text, item.reply_text, item.video_title || '']);
+    }
+
+    if ((rating === 'mejorable' || rating === 'mal') && correction) {
+      // Guarda la corrección de Javi como ejemplo prioritario
+      await pool.query(`
+        INSERT INTO reply_examples (comment_text, reply_text, post_title, network, source, approved_at)
+        VALUES ($1, $2, $3, 'fb', 'agente', NOW())
+      `, [item.comment_text, correction, item.video_title || '']);
+      // Elimina la versión mala del aprendizaje
+      await pool.query(`
+        DELETE FROM reply_examples WHERE comment_text = $1 AND reply_text = $2
+      `, [item.comment_text, item.reply_text]);
+    }
+
+    // Marcar como calificado para que desaparezca del historial
+    await pool.query(`UPDATE comment_state SET source = $1 WHERE id = $2`, 
+      [rating === 'ok' ? 'ai_rated_ok' : 'ai_rated_fix', id]);
+
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // Marcar auto-respuesta como mala — la saca del aprendizaje
