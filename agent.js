@@ -354,7 +354,31 @@ Comentario: ${comment}`;
       })
     });
     const data = await r.json();
-    return data.content?.[0]?.text?.trim() || null;
+    const text = data.content?.[0]?.text?.trim() || null;
+    if (!text) return null;
+
+    // Validar que no sea texto del prompt filtrado
+    const invalidPhrases = [
+      'esperando el comentario',
+      'comentario a responder',
+      'instrucción:',
+      'instruccion:',
+      'categorías y variaciones',
+      'como javi',
+      'respondé como',
+      'responder como javi',
+      'sos javi',
+    ];
+    const textLower = text.toLowerCase();
+    if (invalidPhrases.some(p => textLower.includes(p))) {
+      console.error('[agent] respuesta inválida descartada:', text.substring(0, 80));
+      return null;
+    }
+
+    // Validar longitud mínima y máxima
+    if (text.length < 3 || text.length > 500) return null;
+
+    return text;
   } catch (e) {
     console.error('[agent] generateReply error:', e.message);
     return null;
