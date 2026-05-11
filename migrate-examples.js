@@ -34,14 +34,14 @@ async function migrate() {
       if (exists.rows.length > 0) { skipped++; continue; }
 
       await pool.query(`
-        INSERT INTO reply_examples (comment_text, reply_text, post_title, categoria, network, approved_at)
-        VALUES ($1, $2, $3, $4, $5, NOW())
+        INSERT INTO reply_examples (comment_text, reply_text, post_title, categoria, network, source, approved_at)
+        VALUES ($1, $2, $3, $4, $5, 'historico', NOW())
       `, [
         row.comment_text,
         row.reply_text,
         row.video_title || '',
         row.categoria || 'otro',
-        'yt' // la mayoría era YouTube originalmente
+        'yt'
       ]);
       inserted++;
 
