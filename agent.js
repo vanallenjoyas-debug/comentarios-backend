@@ -36,9 +36,20 @@ async function initAgentDB() {
       post_title TEXT,
       categoria TEXT DEFAULT 'otro',
       network TEXT DEFAULT 'fb',
+      source TEXT DEFAULT 'historico',
       approved_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+
+  // Migración: agregar columna source si no existe
+  const srcCheck = await pool.query(`
+    SELECT column_name FROM information_schema.columns
+    WHERE table_name='reply_examples' AND column_name='source'
+  `);
+  if (srcCheck.rows.length === 0) {
+    await pool.query(`ALTER TABLE reply_examples ADD COLUMN source TEXT DEFAULT 'historico'`);
+    console.log('[agent] columna source agregada a reply_examples');
+  }
 
   // Log de cada corrida del agente
   await pool.query(`
@@ -150,20 +161,40 @@ Respondé SOLO en formato JSON:
 // ─── EJEMPLOS DE APRENDIZAJE ──────────────────────────────────────────────────
 
 async function getLearnedExamples(postId, comentario, limit = 15) {
-  // Primero: ejemplos del mismo post (los más relevantes)
-  const postExamples = await pool.query(`
+  // ── PRIORIDAD 1: ejemplos aprobados manualmente en el agente ─────────────────
+  // Primero del mismo post, luego generales — estos son los más confiables
+  const agentPostExamples = await pool.query(`
     SELECT comment_text, reply_text, post_title FROM reply_examples
-    WHERE post_id = $1
+    WHERE post_id = $1 AND source = 'agente'
     ORDER BY approved_at DESC LIMIT 8
   `, [postId]);
 
-  // Segundo: ejemplos generales de categoría similar
-  const generalExamples = await pool.query(`
+  const agentGeneralExamples = await pool.query(`
     SELECT comment_text, reply_text, post_title FROM reply_examples
+    WHERE source = 'agente'
     ORDER BY approved_at DESC LIMIT $1
   `, [limit]);
 
-  const all = [...postExamples.rows, ...generalExamples.rows];
+  const agentExamples = [...agentPostExamples.rows, ...agentGeneralExamples.rows];
+
+  // ── PRIORIDAD 2: historial viejo (comment_state migrado) ──────────────────────
+  // Solo se usa si el agente tiene menos de 10 ejemplos propios
+  let fallbackExamples = [];
+  if (agentExamples.length < 10) {
+    const needed = limit - agentExamples.length;
+    const fallback = await pool.query(`
+      SELECT comment_text, reply_text, post_title FROM reply_examples
+      WHERE source != 'agente' OR source IS NULL
+      ORDER BY RANDOM() LIMIT $1
+    `, [needed]);
+    fallbackExamples = fallback.rows;
+    if (fallbackExamples.length > 0) {
+      console.log(`[agent] usando ${agentExamples.length} ejemplos agente + ${fallbackExamples.length} fallback histórico`);
+    }
+  }
+
+  const all = [...agentExamples, ...fallbackExamples];
+
   // Deduplicar
   const seen = new Set();
   return all.filter(e => {
@@ -631,8 +662,8 @@ async function approveReply(commentId, finalReplyText) {
 
   // Guardar como ejemplo aprobado — esto alimenta al agente para siempre
   await pool.query(`
-    INSERT INTO reply_examples (comment_text, reply_text, post_id, post_title, network)
-    VALUES ($1, $2, $3, $4, $5)
+    INSERT INTO reply_examples (comment_text, reply_text, post_id, post_title, network, source)
+    VALUES ($1, $2, $3, $4, $5, 'agente')
   `, [item.comment_text, finalReplyText, item.post_id, item.post_title, item.network]);
 
   // Marcar como procesado en la cola
