@@ -227,32 +227,60 @@ async function checkFAQ(comment) {
     const faqs = await pool.query('SELECT * FROM faq WHERE activa = true');
     if (faqs.rows.length === 0) return null;
 
-    for (const faq of faqs.rows) {
-      const matchPrompt = 'Sos un clasificador. Tu única tarea: decidir si un comentario coincide con una pregunta frecuente.\n\n' +
-        'Pregunta frecuente: "' + faq.pregunta + '"\n\n' +
-        'Comentario: "' + comment.substring(0, 300) + '"\n\n' +
-        'El comentario está haciendo esa pregunta al creador del video? Respondé SOLO "si" o "no".';
-
-      try {
-        const r = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
-          body: JSON.stringify({
-            model: 'claude-haiku-4-5',
-            max_tokens: 5,
-            messages: [{ role: 'user', content: matchPrompt }]
-          })
-        });
-        const data = await r.json();
-        const answer = (data.content?.[0]?.text || '').trim().toLowerCase();
-        if (answer.startsWith('si') || answer === 'sí') {
-          const respuesta = faq.respuestas[Math.floor(Math.random() * faq.respuestas.length)];
-          console.log('[agent] FAQ match: "' + faq.pregunta.substring(0, 40) + '"');
-          return respuesta;
-        }
-      } catch(e) {
-        console.error('[agent] FAQ match error:', e.message);
+    // Traer ejemplos de matching aprobados por Javi para cada FAQ
+    let faqExamples = {};
+    try {
+      const exRows = await pool.query('SELECT faq_id, comment_text FROM faq_examples ORDER BY created_at DESC LIMIT 50');
+      for (const ex of exRows.rows) {
+        if (!faqExamples[ex.faq_id]) faqExamples[ex.faq_id] = [];
+        faqExamples[ex.faq_id].push(ex.comment_text);
       }
+    } catch(e) {} // tabla puede no existir aún
+
+    // Construir lista de todas las FAQs en una sola llamada — más eficiente y más contexto
+    const faqList = faqs.rows.map((f, i) => {
+      const examples = faqExamples[f.id] || [];
+      const exBlock = examples.length > 0 ? ' | Ejemplos reales: ' + examples.slice(0,3).map(e => '"'+e+'"').join(', ') : '';
+      return `${i+1}. Pregunta: "${f.pregunta}" | Intención: "${f.keywords}"${exBlock}`;
+    }).join('\n');
+    
+    const matchPrompt = `Sos un clasificador de comentarios para el canal de YouTube/Facebook de Javi, un joyero argentino.
+
+Tu tarea: determinar si el comentario siguiente corresponde a alguna de estas preguntas frecuentes del canal.
+
+PREGUNTAS FRECUENTES:
+${faqList}
+
+COMENTARIO: "${comment.substring(0, 300)}"
+
+REGLAS IMPORTANTES:
+- Analizá la INTENCIÓN del comentario, no solo las palabras exactas
+- Un comentario corto o vago puede igualmente corresponder a una FAQ si el tema coincide
+- Considerá el contexto: es un canal de joyería que trabaja con ácidos, metales y procesos químicos
+- Si el comentario toca el tema de una FAQ aunque sea de forma indirecta, contá como match
+
+Si corresponde a alguna FAQ, respondé SOLO el número (ej: "1" o "2"). Si no corresponde a ninguna, respondé SOLO "no".`;
+
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5',
+        max_tokens: 5,
+        messages: [{ role: 'user', content: matchPrompt }]
+      })
+    });
+    const data = await r.json();
+    const answer = (data.content?.[0]?.text || '').trim().toLowerCase();
+    
+    if (answer === 'no' || answer === '') return null;
+    
+    const idx = parseInt(answer) - 1;
+    if (!isNaN(idx) && faqs.rows[idx]) {
+      const faq = faqs.rows[idx];
+      const respuesta = faq.respuestas[Math.floor(Math.random() * faq.respuestas.length)];
+      console.log('[agent] FAQ match "' + faq.pregunta.substring(0, 40) + '" para: "' + comment.substring(0, 40) + '"');
+      return respuesta;
     }
     return null;
   } catch(e) {
@@ -360,6 +388,8 @@ Comentario: ${comment}`;
     // Validar que no sea texto del prompt filtrado
     const invalidPhrases = [
       'esperando el comentario',
+      'espero el comentario',
+      'espero que me proporciones',
       'comentario a responder',
       'instrucción:',
       'instruccion:',
@@ -368,6 +398,15 @@ Comentario: ${comment}`;
       'respondé como',
       'responder como javi',
       'sos javi',
+      'soy javi romero',
+      'listo para responder',
+      'una vez que lo hagas',
+      'cuando envíes',
+      'cuando me envíes',
+      'proporciones el comentario',
+      'en personaje',
+      'estoy en personaje',
+      'joyería sudaca.',
     ];
     const textLower = text.toLowerCase();
     if (invalidPhrases.some(p => textLower.includes(p))) {
@@ -458,12 +497,13 @@ async function postFBReply(commentId, text) {
 
 // ─── GUARDAR EN comment_state (compatible con sistema existente) ──────────────
 
-async function saveAsAnswered(id, commentText, replyText, videoTitle) {
+async function saveAsAnswered(id, commentText, replyText, videoTitle, postUrl) {
+  try { await pool.query(`ALTER TABLE comment_state ADD COLUMN IF NOT EXISTS post_url TEXT`); } catch(e) {}
   await pool.query(`
-    INSERT INTO comment_state (id, status, comment_text, reply_text, video_title, source)
-    VALUES ($1, 'answered', $2, $3, $4, 'ai')
-    ON CONFLICT (id) DO UPDATE SET status='answered', reply_text=$3, video_title=$4, source='ai'
-  `, [id, commentText || '', replyText || '', videoTitle || '']);
+    INSERT INTO comment_state (id, status, comment_text, reply_text, video_title, source, post_url)
+    VALUES ($1, 'answered', $2, $3, $4, 'ai', $5)
+    ON CONFLICT (id) DO UPDATE SET status='answered', reply_text=$3, video_title=$4, source='ai', post_url=$5
+  `, [id, commentText || '', replyText || '', videoTitle || '', postUrl || '']);
 }
 
 // ─── FILTRO DE RESIDUOS QUÍMICOS — RESPUESTA FIJA ────────────────────────────
@@ -585,6 +625,14 @@ async function runAgent(network = 'fb') {
       for (const comment of postComments) {
         if (processed.has(comment.id)) continue;
 
+        // Skipear comentarios vacíos o sin sentido
+        if (!comment.text || comment.text.trim().length < 2) {
+          skipped++;
+          processed.add(comment.id);
+          console.log('[agent] skipped (muy corto):', JSON.stringify(comment.text));
+          continue;
+        }
+
         // Buscar ejemplos aprendidos
         const examples = await getLearnedExamples(postId, comment.text);
 
@@ -599,7 +647,7 @@ async function runAgent(network = 'fb') {
           const wasteReply = WASTE_RESPONSES[Math.floor(Math.random() * WASTE_RESPONSES.length)];
           try {
             await postFBReply(comment.id, wasteReply);
-            await saveAsAnswered(comment.id, comment.text, wasteReply, postContext.title);
+            await saveAsAnswered(comment.id, comment.text, wasteReply, postContext.title, comment.postUrl);
             autoReplied++;
             console.log('[agent] ✅ residuos (respuesta fija): "' + comment.text.substring(0, 50) + '"');
           } catch(e) {
@@ -616,7 +664,7 @@ async function runAgent(network = 'fb') {
         if (faqReply && !chemRisk) {
           try {
             await postFBReply(comment.id, faqReply);
-            await saveAsAnswered(comment.id, comment.text, faqReply, postContext.title);
+            await saveAsAnswered(comment.id, comment.text, faqReply, postContext.title, comment.postUrl);
             autoReplied++;
             console.log('[agent] ✅ FAQ auto-respondido: "' + comment.text.substring(0, 50) + '"');
           } catch(e) {
@@ -635,7 +683,10 @@ async function runAgent(network = 'fb') {
         const reply = await generateReply(comment.text, postContext, examples);
 
         if (!reply) {
-          skipped++;
+          // Fallback: respuesta genérica para comentarios que el modelo no supo procesar
+          const fallbackReply = 'perdón, no entiendo bien la pregunta 🤷';
+          await addToQueue(comment, postContext, fallbackReply, 0.1, 'modelo_no_respondio');
+          queued++;
           processed.add(comment.id);
           continue;
         }
@@ -644,7 +695,7 @@ async function runAgent(network = 'fb') {
           // ── AUTO-RESPONDER ──────────────────────────────────────────────────
           try {
             await postFBReply(comment.id, reply);
-            await saveAsAnswered(comment.id, comment.text, reply, postContext.title);
+            await saveAsAnswered(comment.id, comment.text, reply, postContext.title, comment.postUrl);
             autoReplied++;
             console.log(`[agent] ✅ auto-respondido: "${comment.text.substring(0, 50)}..."`);
           } catch (e) {
@@ -702,9 +753,9 @@ async function fetchFBComments(answeredIds, discardedIds, queuedIds) {
 
   try {
     // Posts
-    let pageUrl = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time&limit=10&access_token=${FB_TOKEN}`;
+    let pageUrl = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time&limit=20&access_token=${FB_TOKEN}`;
     let pagesChecked = 0;
-    const MAX_PAGES = 3;
+    const MAX_PAGES = 5;
 
     while (pageUrl && pagesChecked < MAX_PAGES) {
       const r = await fetch(pageUrl);
@@ -729,6 +780,7 @@ async function fetchFBComments(answeredIds, discardedIds, queuedIds) {
             id: c.id,
             postId: post.id,
             postMessage: post.message || '',
+            postUrl: `https://www.facebook.com/${FB_PAGE_ID}/posts/${post.id.split('_')[1] || post.id}`,
             text: c.message || '',
             author: c.from?.name || 'Usuario',
             publishedAt: c.created_time,
@@ -742,7 +794,7 @@ async function fetchFBComments(answeredIds, discardedIds, queuedIds) {
     }
 
     // Reels
-    const reelsRes = await fetch(`https://graph.facebook.com/v19.0/${FB_PAGE_ID}/video_reels?fields=id,description,created_time&limit=20&access_token=${FB_TOKEN}`);
+    const reelsRes = await fetch(`https://graph.facebook.com/v19.0/${FB_PAGE_ID}/video_reels?fields=id,description,created_time&limit=50&access_token=${FB_TOKEN}`);
     const reelsData = await reelsRes.json();
     if (reelsRes.ok && reelsData.data) {
       for (const reel of reelsData.data) {
@@ -760,6 +812,7 @@ async function fetchFBComments(answeredIds, discardedIds, queuedIds) {
             id: c.id,
             postId: reel.id,
             postMessage: reel.description || '',
+            postUrl: `https://www.facebook.com/reel/${reel.id.split('_')[1] || reel.id}`,
             text: c.message || '',
             author: c.from?.name || 'Usuario',
             publishedAt: c.created_time,
@@ -775,11 +828,13 @@ async function fetchFBComments(answeredIds, discardedIds, queuedIds) {
   // Más nuevos primero, máximo 30 por ciclo para no saturar
   comments.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
   console.log('[agent/fetchFB] total encontrados antes de filtrar: ' + comments.length);
-  return comments.slice(0, 30);
+  return comments.slice(0, 50);
 }
 
 async function fetchAllPostComments(postId) {
-  const url = `https://graph.facebook.com/v19.0/${postId}/comments?fields=id,message,from,created_time,comments{id,from}&limit=50&order=reverse_chronological&access_token=${FB_TOKEN}`;
+  // Traer comentarios sin respuesta — filter=stream trae todos, luego filtramos los que no tienen reply de la página
+  // Usamos filter=toplevel para evitar subcomentarios y order=reverse_chronological para los más nuevos primero
+  const url = `https://graph.facebook.com/v19.0/${postId}/comments?fields=id,message,from,created_time,comments{id,from,message}&limit=100&order=reverse_chronological&filter=stream&access_token=${FB_TOKEN}`;
   const r = await fetch(url);
   const data = await r.json();
   if (!r.ok || !data.data) return [];
@@ -789,9 +844,13 @@ async function fetchAllPostComments(postId) {
 // ─── COLA DE REVISIÓN ─────────────────────────────────────────────────────────
 
 async function addToQueue(comment, postContext, suggestedReply, confidence, reason) {
+  // Ensure post_url column exists
+  try {
+    await pool.query(`ALTER TABLE review_queue ADD COLUMN IF NOT EXISTS post_url TEXT`);
+  } catch(e) {}
   await pool.query(`
-    INSERT INTO review_queue (id, comment_text, post_id, post_title, author, network, suggested_reply, confidence, reason)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    INSERT INTO review_queue (id, comment_text, post_id, post_title, author, network, suggested_reply, confidence, reason, post_url)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
     ON CONFLICT (id) DO NOTHING
   `, [
     comment.id,
@@ -802,7 +861,8 @@ async function addToQueue(comment, postContext, suggestedReply, confidence, reas
     comment.network || 'fb',
     suggestedReply,
     confidence,
-    reason
+    reason,
+    comment.postUrl || ''
   ]);
 }
 
