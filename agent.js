@@ -225,19 +225,34 @@ function selectModel(comment, postContext) {
 async function checkFAQ(comment) {
   try {
     const faqs = await pool.query('SELECT * FROM faq WHERE activa = true');
-    const text = comment.toLowerCase();
-    let best = null;
+    if (faqs.rows.length === 0) return null;
+
     for (const faq of faqs.rows) {
-      const keys = faq.keywords.toLowerCase().split(',').map(k => k.trim()).filter(Boolean);
-      const matches = keys.filter(k => text.includes(k));
-      if (matches.length > 0 && (!best || matches.length > best.matchCount)) {
-        best = { ...faq, matchCount: matches.length };
+      const matchPrompt = 'Sos un clasificador. Tu única tarea: decidir si un comentario coincide con una pregunta frecuente.\n\n' +
+        'Pregunta frecuente: "' + faq.pregunta + '"\n\n' +
+        'Comentario: "' + comment.substring(0, 300) + '"\n\n' +
+        'El comentario está haciendo esa pregunta al creador del video? Respondé SOLO "si" o "no".';
+
+      try {
+        const r = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
+          body: JSON.stringify({
+            model: 'claude-haiku-4-5',
+            max_tokens: 5,
+            messages: [{ role: 'user', content: matchPrompt }]
+          })
+        });
+        const data = await r.json();
+        const answer = (data.content?.[0]?.text || '').trim().toLowerCase();
+        if (answer.startsWith('si') || answer === 'sí') {
+          const respuesta = faq.respuestas[Math.floor(Math.random() * faq.respuestas.length)];
+          console.log('[agent] FAQ match: "' + faq.pregunta.substring(0, 40) + '"');
+          return respuesta;
+        }
+      } catch(e) {
+        console.error('[agent] FAQ match error:', e.message);
       }
-    }
-    if (best && best.respuestas && best.respuestas.length > 0) {
-      const respuesta = best.respuestas[Math.floor(Math.random() * best.respuestas.length)];
-      console.log('[agent] FAQ match: "' + best.pregunta.substring(0,40) + '"');
-      return respuesta;
     }
     return null;
   } catch(e) {
@@ -677,6 +692,7 @@ async function fetchFBComments(answeredIds, discardedIds, queuedIds) {
 
   // Más nuevos primero, máximo 30 por ciclo para no saturar
   comments.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
+  console.log('[agent/fetchFB] total encontrados antes de filtrar: ' + comments.length);
   return comments.slice(0, 30);
 }
 
