@@ -219,6 +219,33 @@ function selectModel(comment, postContext) {
   return model;
 }
 
+
+// ─── BUSCAR FAQ MATCH ─────────────────────────────────────────────────────────
+
+async function checkFAQ(comment) {
+  try {
+    const faqs = await pool.query('SELECT * FROM faq WHERE activa = true');
+    const text = comment.toLowerCase();
+    let best = null;
+    for (const faq of faqs.rows) {
+      const keys = faq.keywords.toLowerCase().split(',').map(k => k.trim()).filter(Boolean);
+      const matches = keys.filter(k => text.includes(k));
+      if (matches.length > 0 && (!best || matches.length > best.matchCount)) {
+        best = { ...faq, matchCount: matches.length };
+      }
+    }
+    if (best && best.respuestas && best.respuestas.length > 0) {
+      const respuesta = best.respuestas[Math.floor(Math.random() * best.respuestas.length)];
+      console.log('[agent] FAQ match: "' + best.pregunta.substring(0,40) + '"');
+      return respuesta;
+    }
+    return null;
+  } catch(e) {
+    console.error('[agent] checkFAQ error:', e.message);
+    return null;
+  }
+}
+
 // ─── GENERADOR DE RESPUESTA ─────────────────────────────────────────────────
 
 async function generateReply(comment, postContext, examples) {
@@ -491,6 +518,23 @@ async function runAgent(network = 'fb') {
         const chemRisk = isChemicalRisk(comment.text);
         if (chemRisk) {
           console.log(`[agent] ⚠️ riesgo químico detectado, mandando a cola: "${comment.text.substring(0, 50)}"`);
+        }
+
+        // Chequear FAQ primero — respuesta canónica si hay match
+        const faqReply = await checkFAQ(comment.text);
+        if (faqReply && !chemRisk) {
+          try {
+            await postFBReply(comment.id, faqReply);
+            await saveAsAnswered(comment.id, comment.text, faqReply, postContext.title);
+            autoReplied++;
+            console.log('[agent] ✅ FAQ auto-respondido: "' + comment.text.substring(0, 50) + '"');
+          } catch(e) {
+            await addToQueue(comment, postContext, faqReply, 0.95, 'faq_match');
+            queued++;
+          }
+          processed.add(comment.id);
+          await new Promise(r => setTimeout(r, 500));
+          continue;
         }
 
         // Calcular confianza
