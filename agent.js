@@ -262,27 +262,33 @@ async function checkFAQ(comment) {
 }
 
 // ─── GENERADOR DE RESPUESTA ─────────────────────────────────────────────────
+// Usa exactamente el mismo prompt y lógica que /suggest-reply — el que ya funcionaba bien
 
 async function generateReply(comment, postContext, examples) {
-  const examplesBlock = examples.length > 0
-    ? '\nAPRENDÉ EL TONO de estos ejemplos reales aprobados por Javi. No copies ninguno igual — usalos como guía de estilo:\n' +
-      examples.map((e, i) => `\nEjemplo ${i+1}:${e.post_title ? "\n(Post: "+e.post_title+")" : ""}\nComentario: "${e.comment_text}"\nRespuesta: "${e.reply_text}"`).join('\n')
+  // Construir bloque de ejemplos con los aprobados por Javi (prioridad agente, luego histórico)
+  let ejemplosBloque = '';
+  if (examples.length > 0) {
+    ejemplosBloque = '\n\nAPRENDÉ EL TONO de estos ejemplos reales de Javi. No copies ninguno igual — usalos como guía de estilo:\n';
+    examples.forEach((ex, i) => {
+      ejemplosBloque += '\nEjemplo ' + (i+1) + ':' + (ex.post_title ? '\n(Post: ' + ex.post_title + ')' : '') + '\nComentario: "' + ex.comment_text + '"\nRespuesta: "' + ex.reply_text + '"\n';
+    });
+  }
+
+  // Contexto del post si existe
+  const contextBlock = postContext && postContext.title
+    ? '\n[Contexto del post: ' + postContext.title + ' — ' + (postContext.typical_comments || '') + ']'
     : '';
 
-  const contextBlock = postContext
-    ? `\nCONTEXTO DEL POST: ${postContext.title || ''} | Tipo: ${postContext.content_type || 'general'} | Comentarios típicos: ${postContext.typical_comments || ''}`
-    : '';
-
-  const prompt = `Sos Javi (Javier Romero), joyero argentino del canal Joyeria Sudaca. Tu tono es casual, directo, rioplatense natural — sin exagerar el acento, sin sonar a robot.${contextBlock}${examplesBlock}
+  const prompt = 'Sos Javi (Javier Romero), joyero argentino del canal Joyeria Sudaca. Tu tono es casual, directo, rioplatense natural — sin exagerar el acento, sin sonar a robot.' + contextBlock + ejemplosBloque + `
 
 CATEGORÍAS Y VARIACIONES — elegí UNA al azar de la categoría que corresponda:
 
 Elogios o felicitaciones:
 - "muchas gracias me alegro que te guste mi contenido"
 - "gracias por el aguante, me pone muy feliz que te guste"
-- "muchas gracias bro, un abrazo grande"
-- "gracias de verdad, me pone muy feliz que me digas esto"
-- "increíble lo que me decís, muchas gracias por el aguante!!!"
+- "muchas gracias bro, un abrazo grande 🙌"
+- "gracias de verdad, me pone muy feliz que me digas esto 😄"
+- "increíble lo que me decís, muchas gracias por el aguante!!! 💪"
 
 Yeti / Híbrido:
 - "jajaja me suelen decir que me parezco al yeti, es verdad"
@@ -296,7 +302,7 @@ Joyería Sudaca / aguante sudaca:
 - "100% sudacas"
 - "esto es joyería sudaca papá"
 - "todos somos joyería sudaca"
-- "claro que sí"
+- "claro que sí 💪"
 
 Cuestionan que no explico bien el proceso o piden más detalle:
 - "este video no es un tutorial ni un curso, es una forma de hacer que más gente conozca el oficio"
@@ -304,13 +310,13 @@ Cuestionan que no explico bien el proceso o piden más detalle:
 - "son videos entretenidos para que más gente conozca el oficio, no se puede hacer un curso en 30 segundos"
 
 Quieren empezar en joyería / piden consejos:
-- "si te lo proponés lo podés lograr, metele para adelante"
+- "si te lo proponés lo podés lograr, metele para adelante 💪"
 - "se empieza por el principio, metele y ya vas a lograr hacer tus primeras piezas"
-- "metele, si te gusta el oficio siempre se puede aprender"
+- "metele, si te gusta el oficio siempre se puede aprender 🙌"
 
 Elogian mi forma de narrar / el speech:
 - "muchas gracias mi hermano, me pone contento que te guste la forma que tengo de explicar"
-- "jaja me alegro bro, muchas gracias"
+- "jaja me alegro bro, muchas gracias 😄"
 - "la verdad que sí, si me pongo a escuchar lo que digo es gracioso jaja"
 
 REGLAS:
@@ -332,9 +338,7 @@ REGLAS:
 - "Por qué no fundís directo?" → "Si solo fundimos no podemos garantizar la pureza del metal"
 - Pepetools → "Está en mi bio, cupón vanallen 10% de descuento"
 - Saludo desde otro país → variación de "me alegro que te guste el contenido, abrazo grande"
-- Si el post es sobre una técnica específica y el comentario da consejos no pedidos → responder con humor breve sin invalidar al usuario
-
-- IDIOMA: detectá el idioma del comentario y respondé EN ESE MISMO IDIOMA. Si no es español, usá respuestas muy genéricas y cortas (ej: inglés → "thanks so much! 🙌", portugués → "obrigado! 💪", italiano → "grazie mille! 😄"). Nunca respondas en español a un comentario en otro idioma.
+- IDIOMA: detectá el idioma del comentario y respondé EN ESE MISMO IDIOMA. Si no es español, usá respuestas genéricas y cortas.
 
 INSTRUCCIÓN: UNA SOLA respuesta lista para publicar, sin comillas ni explicaciones.
 Comentario: ${comment}`;
@@ -356,6 +360,7 @@ Comentario: ${comment}`;
     return null;
   }
 }
+
 
 // ─── CALCULAR CONFIANZA ───────────────────────────────────────────────────────
 
@@ -482,13 +487,19 @@ async function runAgent(network = 'fb') {
 
   try {
     // ── 1. TRAER COMENTARIOS ──────────────────────────────────────────────────
-    const state = await pool.query(`SELECT id, status FROM comment_state`);
+    // Solo traer IDs respondidos/descartados en los últimos 60 días para no bloquear todo
+    const state = await pool.query(`
+      SELECT id, status FROM comment_state 
+      WHERE created_at > NOW() - INTERVAL '60 days'
+    `);
     const answeredIds = new Set(state.rows.filter(r => r.status === 'answered').map(r => r.id));
     const discardedIds = new Set(state.rows.filter(r => r.status === 'discarded').map(r => r.id));
 
     // También chequear review_queue para no procesar dos veces
     const inQueue = await pool.query(`SELECT id FROM review_queue WHERE status = 'pending'`);
     const queuedIds = new Set(inQueue.rows.map(r => r.id));
+    
+    console.log('[agent] filtros cargados — answered:', answeredIds.size, '| discarded:', discardedIds.size, '| inQueue:', queuedIds.size);
 
     let comments = [];
 
