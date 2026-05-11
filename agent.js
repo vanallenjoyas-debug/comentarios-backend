@@ -352,6 +352,36 @@ async function saveAsAnswered(id, commentText, replyText, videoTitle) {
   `, [id, commentText || '', replyText || '', videoTitle || '']);
 }
 
+// ─── FILTRO DE SEGURIDAD QUÍMICA ─────────────────────────────────────────────
+// Comentarios con contenido químico/peligroso van SIEMPRE a cola, nunca auto-responden
+// Es un filtro de código — no depende del modelo
+
+function isChemicalRisk(comment) {
+  const text = comment.toLowerCase();
+  const patterns = [
+    // Ácidos y químicos
+    /ácido|acido|nitrico|sulfúrico|sulfurico|clorhídrico|clorhidrico|fluorhídrico|fluorhidrico/,
+    /agua regia|aqua regia|cianuro|cianur/,
+    /hidróxido|hidroxido|soda caustica|soda cáustica|lejía|lejia/,
+    /peróxido|peroxido|h2o2|hno3|h2so4|hcl/,
+    // Procesos peligrosos
+    /fundir|fundición|fundicion|derretir|derretí/,
+    /temperatura|grados|celsius|fahrenheit|°c|°f/,
+    /mezcl|combina|disuelv|diluí|dilui/,
+    /electrolisis|electrólisis|electrolit/,
+    /cloro|amoniaco|amoníaco/,
+    // Metales y procesos de refinado
+    /refinar|refinado|purificar|pureza|quilate|karat/,
+    /mercurio|plomo|arsénico|arsenico|cadmio/,
+    /soldar|soldadura|flux|borax|bórax/,
+    /decapar|decapado|mordiente/,
+    // Vapores y gases
+    /vapor|gas|humo|ventilación|ventilacion|respirar|inhalar/,
+    /tóxico|toxico|veneno|peligro|quemadura/
+  ];
+  return patterns.some(p => p.test(text));
+}
+
 // ─── CICLO PRINCIPAL DEL AGENTE ───────────────────────────────────────────────
 
 async function runAgent(network = 'fb') {
@@ -414,8 +444,14 @@ async function runAgent(network = 'fb') {
         // Buscar ejemplos aprendidos
         const examples = await getLearnedExamples(postId, comment.text);
 
+        // Filtro de seguridad química — va siempre a cola, nunca auto-responde
+        const chemRisk = isChemicalRisk(comment.text);
+        if (chemRisk) {
+          console.log(`[agent] ⚠️ riesgo químico detectado, mandando a cola: "${comment.text.substring(0, 50)}"`);
+        }
+
         // Calcular confianza
-        const confidence = await calculateConfidence(comment.text, postId);
+        const confidence = chemRisk ? 0 : await calculateConfidence(comment.text, postId);
 
         // Generar respuesta
         const reply = await generateReply(comment.text, postContext, examples);
@@ -426,7 +462,7 @@ async function runAgent(network = 'fb') {
           continue;
         }
 
-        if (confidence >= 0.65) {
+        if (confidence >= 0.65 && !chemRisk) {
           // ── AUTO-RESPONDER ──────────────────────────────────────────────────
           try {
             await postFBReply(comment.id, reply);
@@ -441,7 +477,7 @@ async function runAgent(network = 'fb') {
           }
         } else {
           // ── MANDAR A COLA DE REVISIÓN ───────────────────────────────────────
-          await addToQueue(comment, postContext, reply, confidence, 'baja_confianza');
+          await addToQueue(comment, postContext, reply, confidence, chemRisk ? 'quimica_siempre_manual' : 'baja_confianza');
           queued++;
           console.log(`[agent] 👁️ en cola (conf=${confidence.toFixed(2)}): "${comment.text.substring(0, 50)}..."`);
         }
