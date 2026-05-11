@@ -466,6 +466,30 @@ async function saveAsAnswered(id, commentText, replyText, videoTitle) {
   `, [id, commentText || '', replyText || '', videoTitle || '']);
 }
 
+// ─── FILTRO DE RESIDUOS QUÍMICOS — RESPUESTA FIJA ────────────────────────────
+// Nunca pasa por el modelo. Responde siempre con texto exacto aprobado por Javi.
+
+const WASTE_RESPONSES = [
+  'claro que no lo tiro al inodoro, por favor! El ácido se neutraliza y se almacena para luego ser entregado a una empresa que se encarga de su neutralización final 💪',
+  'jamás al desagüe! Se neutraliza y va a disposición final con empresa especializada 🙌',
+  'eso nunca, se neutraliza con bicarbonato y se entrega a empresa de disposición final 👋'
+];
+
+function isWasteQuestion(comment) {
+  const text = comment.toLowerCase();
+  // Debe mencionar residuos/descarte Y contexto químico
+  const residuoPatterns = [
+    /tir(á|a|as|o)\s*(el\s*)?(ácido|acido|líquido|liquido|residuo|desecho)/,
+    /qué\s*hac(é|e)s?\s*(con\s*)?(el\s*)?(ácido|acido|residuo|desecho|líquido)/,
+    /cómo\s*(descart|eliminá|tir)/,
+    /inodoro|cañería|caneria|desagüe|desague|alcantarilla/,
+    /residuo|desecho|descarte|neutraliza/,
+    /contamina|medio\s*ambiente|ecolog/
+  ];
+  const acidContext = /ácido|acido|químico|quimico|nitrico|sulfúrico|sulfurico|solución|solucion/.test(text);
+  return residuoPatterns.some(p => p.test(text)) && (acidContext || /residuo|desecho|neutraliza/.test(text));
+}
+
 // ─── FILTRO DE SEGURIDAD QUÍMICA ─────────────────────────────────────────────
 // Comentarios con contenido químico/peligroso van SIEMPRE a cola, nunca auto-responden
 // Es un filtro de código — no depende del modelo
@@ -568,6 +592,23 @@ async function runAgent(network = 'fb') {
         const chemRisk = isChemicalRisk(comment.text);
         if (chemRisk) {
           console.log(`[agent] ⚠️ riesgo químico detectado, mandando a cola: "${comment.text.substring(0, 50)}"`);
+        }
+
+        // Filtro de residuos — respuesta fija, nunca pasa por el modelo
+        if (isWasteQuestion(comment.text)) {
+          const wasteReply = WASTE_RESPONSES[Math.floor(Math.random() * WASTE_RESPONSES.length)];
+          try {
+            await postFBReply(comment.id, wasteReply);
+            await saveAsAnswered(comment.id, comment.text, wasteReply, postContext.title);
+            autoReplied++;
+            console.log('[agent] ✅ residuos (respuesta fija): "' + comment.text.substring(0, 50) + '"');
+          } catch(e) {
+            await addToQueue(comment, postContext, wasteReply, 0.99, 'residuos_fijo');
+            queued++;
+          }
+          processed.add(comment.id);
+          await new Promise(r => setTimeout(r, 500));
+          continue;
         }
 
         // Chequear FAQ primero — respuesta canónica si hay match
