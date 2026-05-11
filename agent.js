@@ -493,7 +493,7 @@ async function runAgent(network = 'fb') {
           continue;
         }
 
-        if (confidence >= 0.65 && !chemRisk) {
+        if (confidence >= 0.55 && !chemRisk) {
           // ── AUTO-RESPONDER ──────────────────────────────────────────────────
           try {
             await postFBReply(comment.id, reply);
