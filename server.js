@@ -1063,7 +1063,7 @@ app.get('/agent/history', async (req, res) => {
       ? "WHERE source = 'ai'" 
       : "WHERE source IN ('ai','ai_rated_ok','ai_rated_fix')";
     const result = await pool.query(`
-      SELECT id, comment_text, reply_text, video_title, created_at
+      SELECT id, comment_text, reply_text, video_title, post_url, created_at
       FROM comment_state
       ${whereClause}
       ORDER BY created_at DESC
