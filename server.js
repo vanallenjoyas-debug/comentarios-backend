@@ -1,758 +1,322 @@
-// v39 - AGENTE AUTÓNOMO
-const express = require('express');
-const cors = require('cors');
-const { google } = require('googleapis');
-const session = require('express-session');
+// AGENTE AUTÓNOMO DE COMENTARIOS - v1
+// Se corre cada 2hs via cron interno
+// Aprende de cada 👍 que hace Javi
+
 const { Pool } = require('pg');
-const agent = require('./agent');
-
-const app = express();
-
-app.use((req, res, next) => {
-  let data = '';
-  req.setEncoding('utf8');
-  req.on('data', chunk => { data += chunk; });
-  req.on('end', () => {
-    try {
-      req.body = data ? JSON.parse(data.replace(/[\x00-\x1F\x7F]/g, ' ')) : {};
-    } catch(e) {
-      req.body = {};
-    }
-    next();
-  });
-});
-
-app.use(cors({
-  origin: [
-    'https://storied-squirrel-fb5eea.netlify.app',
-    'https://moonlit-crumble-d1585d.netlify.app',
-    'https://vanallenjoyas-debug.github.io',
-    'http://localhost:3000'
-  ],
-  credentials: true
-}));
-app.use(session({
-  secret: process.env.SESSION_SECRET || 'sudaca-secret-2024',
-  resave: false,
-  saveUninitialized: false,
-  cookie: { secure: process.env.NODE_ENV === 'production', maxAge: 7 * 24 * 60 * 60 * 1000 }
-}));
-
-console.log("DB URL:", process.env.PG_URL || process.env.DATABASE_URL || "NO URL FOUND");
 const pool = new Pool({ connectionString: process.env.PG_URL });
 
-async function initDB() {
-  console.log('initDB: iniciando CREATE TABLE...');
+const FB_PAGE_ID = (process.env.FB_PAGE_ID || '').trim();
+const FB_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
+const ANTHROPIC_KEY = (process.env.ANTHROPIC_API_KEY || '').trim();
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+// ─── DB SETUP ────────────────────────────────────────────────────────────────
+
+async function initAgentDB() {
+  // Contexto por video/post: qué tipo de contenido es, qué comentarios recibe
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS comment_state (
+    CREATE TABLE IF NOT EXISTS video_context (
+      post_id TEXT PRIMARY KEY,
+      title TEXT,
+      description TEXT,
+      content_type TEXT DEFAULT 'general',
+      typical_comments TEXT,
+      last_updated TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  // Ejemplos aprobados por Javi (👍) — el corazón del aprendizaje
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS reply_examples (
+      id SERIAL PRIMARY KEY,
+      comment_text TEXT NOT NULL,
+      reply_text TEXT NOT NULL,
+      post_id TEXT,
+      post_title TEXT,
+      categoria TEXT DEFAULT 'otro',
+      network TEXT DEFAULT 'fb',
+      source TEXT DEFAULT 'historico',
+      approved_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  // Migración: agregar columna source si no existe
+  const srcCheck = await pool.query(`
+    SELECT column_name FROM information_schema.columns
+    WHERE table_name='reply_examples' AND column_name='source'
+  `);
+  if (srcCheck.rows.length === 0) {
+    await pool.query(`ALTER TABLE reply_examples ADD COLUMN source TEXT DEFAULT 'historico'`);
+    console.log('[agent] columna source agregada a reply_examples');
+  }
+
+  // Log de cada corrida del agente
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS agent_runs (
+      id SERIAL PRIMARY KEY,
+      started_at TIMESTAMPTZ DEFAULT NOW(),
+      finished_at TIMESTAMPTZ,
+      network TEXT DEFAULT 'fb',
+      comments_fetched INT DEFAULT 0,
+      comments_auto_replied INT DEFAULT 0,
+      comments_queued INT DEFAULT 0,
+      comments_skipped INT DEFAULT 0,
+      error TEXT
+    )
+  `);
+
+  // Cola de revisión: comentarios que el agente no supo resolver con confianza
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS review_queue (
       id TEXT PRIMARY KEY,
-      status TEXT NOT NULL,
       comment_text TEXT,
-      video_title TEXT,
-      reply_text TEXT,
+      post_id TEXT,
+      post_title TEXT,
+      author TEXT,
+      network TEXT DEFAULT 'fb',
+      suggested_reply TEXT,
+      confidence FLOAT DEFAULT 0,
+      reason TEXT,
+      status TEXT DEFAULT 'pending',
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
-  console.log('initDB: CREATE TABLE ok. Chequeando columna source...');
-  const colCheck = await pool.query(`
-    SELECT column_name FROM information_schema.columns
-    WHERE table_name='comment_state' AND column_name='source'
-  `);
-  if (colCheck.rows.length === 0) {
-    console.log('initDB: columna source no existe, agregando...');
-    await pool.query(`ALTER TABLE comment_state ADD COLUMN source TEXT DEFAULT 'javi'`);
-    console.log('initDB: columna source agregada.');
-  } else {
-    console.log('initDB: columna source ya existe, saltando ALTER TABLE.');
+
+  console.log('[agent] DB tables ok');
+}
+
+// ─── TELEGRAM ─────────────────────────────────────────────────────────────────
+
+async function sendTelegram(msg) {
+  if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: msg, parse_mode: 'HTML' })
+    });
+  } catch (e) {
+    console.error('[telegram] error:', e.message);
   }
-  // Migración columna categoria
-  const catCheck = await pool.query(`
-    SELECT column_name FROM information_schema.columns
-    WHERE table_name='comment_state' AND column_name='categoria'
-  `);
-  if (catCheck.rows.length === 0) {
-    console.log('initDB: agregando columna categoria...');
-    await pool.query(`ALTER TABLE comment_state ADD COLUMN categoria TEXT DEFAULT 'otro'`);
-    console.log('initDB: columna categoria agregada.');
-  } else {
-    console.log('initDB: columna categoria ya existe.');
-  }
-  console.log('DB lista - v37 - ' + new Date().toISOString());
 }
 
-async function getState() {
-  const res = await pool.query(`SELECT id, status FROM comment_state`);
-  const answered = res.rows.filter(r => r.status === 'answered').map(r => r.id);
-  const discarded = res.rows.filter(r => r.status === 'discarded').map(r => r.id);
-  return { answered, discarded };
-}
+// ─── CONTEXTO DEL VIDEO/POST ──────────────────────────────────────────────────
 
-async function markAnswered(id, commentText, replyText, videoTitle, source = 'javi') {
-  await pool.query(`
-    INSERT INTO comment_state (id, status, comment_text, reply_text, video_title, source)
-    VALUES ($1, 'answered', $2, $3, $4, $5)
-    ON CONFLICT (id) DO UPDATE SET status='answered', reply_text=$3, video_title=$4, source=$5
-  `, [id, commentText || '', replyText || '', videoTitle || '', source]);
-}
+async function getOrBuildPostContext(postId, postMessage, network) {
+  // Ver si ya tenemos contexto guardado
+  const existing = await pool.query(
+    `SELECT * FROM video_context WHERE post_id = $1`, [postId]
+  );
+  if (existing.rows.length > 0) return existing.rows[0];
 
-async function markDiscarded(id) {
-  await pool.query(`
-    INSERT INTO comment_state (id, status)
-    VALUES ($1, 'discarded')
-    ON CONFLICT (id) DO UPDATE SET status='discarded'
-  `, [id]);
-}
+  // Buscar ejemplos previos de este post para entender qué tipo de comentarios recibe
+  const examples = await pool.query(
+    `SELECT comment_text, reply_text FROM reply_examples WHERE post_id = $1 LIMIT 10`, [postId]
+  );
 
-async function getExamples(limit = 20, categoria = null) {
-  // Si hay categoría, intentar traer ejemplos específicos primero
-  if (categoria && categoria !== 'otro') {
-    const res = await pool.query(`
-      SELECT comment_text, reply_text, video_title FROM comment_state
-      WHERE status = 'answered' AND comment_text != '' AND reply_text != ''
-      AND (source = 'javi' OR source IS NULL)
-      AND categoria = $2
-      ORDER BY RANDOM() LIMIT $1
-    `, [limit, categoria]);
-    if (res.rows.length >= 5) return res.rows;
-  }
-  // Fallback: ejemplos aleatorios generales
-  const res = await pool.query(`
-    SELECT comment_text, reply_text, video_title FROM comment_state
-    WHERE status = 'answered' AND comment_text != '' AND reply_text != ''
-    AND (source = 'javi' OR source IS NULL)
-    ORDER BY RANDOM() LIMIT $1
-  `, [limit]);
-  return res.rows;
-}
+  // Construir contexto automáticamente con Claude
+  const contextPrompt = `Analizá este post de un joyero argentino (canal Joyería Sudaca) y describí brevemente:
+1. De qué trata (1 línea)
+2. Qué tipo de comentarios suele recibir (1 línea)
+3. Categoría del contenido: proceso_quimico | proceso_taller | herramientas | curso_info | general
 
-const CATEGORIAS_VALIDAS = ['elogio','yeti_hibrido','sudaca','proceso','aprender','narracion','compra','curso','gracioso','otro'];
+Mensaje del post: "${(postMessage || '').substring(0, 300)}"
+${examples.rows.length > 0 ? `\nComentarios previos en este post:\n${examples.rows.map(e => `- "${e.comment_text}"`).join('\n')}` : ''}
 
-async function clasificarComentario(text) {
-  const apiKey = (process.env.ANTHROPIC_API_KEY || '').trim();
+Respondé SOLO en formato JSON:
+{"title":"...","typical_comments":"...","content_type":"..."}`;
+
+  let contextData = { title: postMessage?.substring(0, 60) || postId, typical_comments: 'variados', content_type: 'general' };
+
   try {
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
         model: 'claude-haiku-4-5',
-        max_tokens: 10,
-        messages: [{ role: 'user', content: `Clasificá este comentario de YouTube en UNA categoría. Respondé SOLO la palabra clave.
-
-Categorías:
-- elogio (felicitaciones, le gusta el video, apoyo)
-- yeti_hibrido (lo llaman yeti, híbrido, parecido a alguien)
-- sudaca (orgullo sudaca, joyería sudaca)
-- proceso (preguntas sobre proceso técnico o químico)
-- aprender (quieren aprender joyería, consejos para empezar)
-- narracion (elogian cómo habla o explica)
-- compra (quieren comprar, preguntan envío o precio)
-- curso (preguntan por cursos o clases)
-- gracioso (humor, chiste)
-- otro
-
-Comentario: "${text.substring(0, 200)}"` }]
+        max_tokens: 150,
+        messages: [{ role: 'user', content: contextPrompt }]
       })
     });
     const data = await r.json();
-    const cat = (data.content?.[0]?.text || '').trim().toLowerCase().split(/\s/)[0];
-    return CATEGORIAS_VALIDAS.includes(cat) ? cat : 'otro';
-  } catch(e) { return 'otro'; }
+    const text = data.content?.[0]?.text || '{}';
+    const clean = text.replace(/```json|```/g, '').trim();
+    contextData = { ...contextData, ...JSON.parse(clean) };
+  } catch (e) {
+    console.log('[agent] context build error:', e.message);
+  }
+
+  // Guardar para siempre
+  await pool.query(`
+    INSERT INTO video_context (post_id, title, description, content_type, typical_comments)
+    VALUES ($1, $2, $3, $4, $5)
+    ON CONFLICT (post_id) DO UPDATE SET 
+      typical_comments=$5, last_updated=NOW()
+  `, [postId, contextData.title, postMessage || '', contextData.content_type, contextData.typical_comments]);
+
+  return contextData;
 }
 
-async function actualizarCategoria(id, categoria) {
-  await pool.query(`UPDATE comment_state SET categoria = $2 WHERE id = $1`, [id, categoria]);
+// ─── EJEMPLOS DE APRENDIZAJE ──────────────────────────────────────────────────
+
+async function getLearnedExamples(postId, comentario, limit = 15) {
+  // ── PRIORIDAD 1: ejemplos aprobados manualmente en el agente ─────────────────
+  // Primero del mismo post, luego generales — estos son los más confiables
+  const agentPostExamples = await pool.query(`
+    SELECT comment_text, reply_text, post_title FROM reply_examples
+    WHERE post_id = $1 AND source = 'agente'
+    ORDER BY approved_at DESC LIMIT 8
+  `, [postId]);
+
+  const agentGeneralExamples = await pool.query(`
+    SELECT comment_text, reply_text, post_title FROM reply_examples
+    WHERE source = 'agente'
+    ORDER BY approved_at DESC LIMIT $1
+  `, [limit]);
+
+  const agentExamples = [...agentPostExamples.rows, ...agentGeneralExamples.rows];
+
+  // ── PRIORIDAD 2: historial viejo (comment_state migrado) ──────────────────────
+  // Solo se usa si el agente tiene menos de 10 ejemplos propios
+  let fallbackExamples = [];
+  if (agentExamples.length < 10) {
+    const needed = limit - agentExamples.length;
+    const fallback = await pool.query(`
+      SELECT comment_text, reply_text, post_title FROM reply_examples
+      WHERE source != 'agente' OR source IS NULL
+      ORDER BY RANDOM() LIMIT $1
+    `, [needed]);
+    fallbackExamples = fallback.rows;
+    if (fallbackExamples.length > 0) {
+      console.log(`[agent] usando ${agentExamples.length} ejemplos agente + ${fallbackExamples.length} fallback histórico`);
+    }
+  }
+
+  const all = [...agentExamples, ...fallbackExamples];
+
+  // Deduplicar
+  const seen = new Set();
+  return all.filter(e => {
+    if (seen.has(e.comment_text)) return false;
+    seen.add(e.comment_text);
+    return true;
+  }).slice(0, limit);
 }
 
-const oauth2Client = new google.auth.OAuth2(
-  process.env.GOOGLE_CLIENT_ID,
-  process.env.GOOGLE_CLIENT_SECRET,
-  process.env.REDIRECT_URI
-);
+// ─── SELECCIÓN DE MODELO ──────────────────────────────────────────────────────
+// Haiku para el 90% (barato) — Sonnet solo para casos técnicos o complejos
 
-app.get('/auth/youtube', (req, res) => {
-  const url = oauth2Client.generateAuthUrl({
-    access_type: 'offline',
-    scope: ['https://www.googleapis.com/auth/youtube.force-ssl'],
-    prompt: 'consent'
-  });
-  res.json({ url });
-});
-
-app.get('/auth/callback', async (req, res) => {
-  const { code } = req.query;
-  try {
-    const { tokens } = await oauth2Client.getToken(code);
-    req.session.tokens = tokens;
-    const tokenEncoded = Buffer.from(JSON.stringify(tokens)).toString('base64');
-    res.redirect(process.env.FRONTEND_URL + '?auth=success&token=' + tokenEncoded);
-  } catch (e) {
-    res.redirect(process.env.FRONTEND_URL + '?auth=error');
-  }
-});
-
-app.get('/auth/status', (req, res) => {
-  let tokens = req.session.tokens;
-  if (!tokens && req.headers['x-yt-token']) {
-    try { tokens = JSON.parse(Buffer.from(req.headers['x-yt-token'], 'base64').toString()); } catch(e) {}
-  }
-  res.json({ authenticated: !!tokens });
-});
-
-app.get('/auth/channel', async (req, res) => {
-  let tokens = req.session.tokens;
-  if (!tokens && req.headers['x-yt-token']) {
-    try { tokens = JSON.parse(Buffer.from(req.headers['x-yt-token'], 'base64').toString()); } catch(e) {}
-  }
-  if (!tokens) return res.json({ name: null });
-  try {
-    oauth2Client.setCredentials(tokens);
-    const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
-    const response = await youtube.channels.list({ part: 'snippet', mine: true });
-    const channel = response.data.items?.[0];
-    res.json({ name: channel?.snippet?.title || null, handle: channel?.snippet?.customUrl || null });
-  } catch (e) {
-    res.json({ name: null });
-  }
-});
-
-function requireAuth(req, res, next) {
-  let tokens = req.session.tokens;
-  if (!tokens && req.headers['x-yt-token']) {
-    try { tokens = JSON.parse(Buffer.from(req.headers['x-yt-token'], 'base64').toString()); } catch(e) {}
-  }
-  if (!tokens) return res.status(401).json({ error: 'No autenticado' });
-  oauth2Client.setCredentials(tokens);
-  next();
+function selectModel(comment, postContext) {
+  const text = comment.toLowerCase();
+  const needsSonnet =
+    comment.length > 150 ||
+    (text.split('?').length - 1) >= 2 ||
+    /como|por que|cuanto|temperatura|acido|acido|proceso|refinad|pureza|aleacion|quilate|karat|formula|electro|voltaje|densidad|fundicion/.test(text) ||
+    (postContext && postContext.content_type === 'proceso_quimico' && text.includes('?'));
+  const model = needsSonnet ? 'claude-sonnet-4-20250514' : 'claude-haiku-4-5';
+  console.log('[agent] modelo:', model, '| chars:', comment.length);
+  return model;
 }
 
-app.get('/state', async (req, res) => {
-  try { res.json(await getState()); }
-  catch(e) { res.json({ answered: [], discarded: [] }); }
-});
 
-app.post('/state/answered', async (req, res) => {
-  const { id, commentText, replyText } = req.body;
-  if (!id) return res.status(400).json({ error: 'Falta id' });
-  try { await markAnswered(id, commentText, replyText); res.json({ ok: true }); }
-  catch(e) { res.status(500).json({ error: e.message }); }
-});
+// ─── BUSCAR FAQ MATCH ─────────────────────────────────────────────────────────
 
-app.post('/state/discarded', async (req, res) => {
-  const { id } = req.body;
-  if (!id) return res.status(400).json({ error: 'Falta id' });
-  try { await markDiscarded(id); res.json({ ok: true }); }
-  catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-const MY_CHANNEL_ID = 'UCsGYMvcMeUCxXIx--A7SU6w';
-
-app.get('/comments', requireAuth, async (req, res) => {
+async function checkFAQ(comment) {
   try {
-    const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
-    const { pageToken } = req.query;
-    const state = await getState();
+    const faqs = await pool.query('SELECT * FROM faq WHERE activa = true');
+    if (faqs.rows.length === 0) return null;
 
-    let allItems = [];
-    let currentPageToken = pageToken || undefined;
-    let lastNextPageToken = null;
-    const MAX_YT_PAGES = 3;
-    let pagesChecked = 0;
-
-    while (pagesChecked < MAX_YT_PAGES) {
-      const response = await youtube.commentThreads.list({
-        part: 'snippet,replies',
-        allThreadsRelatedToChannelId: process.env.YOUTUBE_CHANNEL_ID,
-        maxResults: 50,
-        order: 'time',
-        pageToken: currentPageToken
-      });
-      allItems = [...allItems, ...(response.data.items || [])];
-      lastNextPageToken = response.data.nextPageToken || null;
-      pagesChecked++;
-
-      const unanswered = allItems.filter(item => {
-        const replies = item.replies?.comments || [];
-        const answeredByMe = replies.some(r => r.snippet.authorChannelId?.value === MY_CHANNEL_ID);
-        return !answeredByMe && !state.answered.includes(item.id) && !state.discarded.includes(item.id);
-      });
-      if (unanswered.length >= 20 || !lastNextPageToken) break;
-      currentPageToken = lastNextPageToken;
-    }
-
-    const comments = allItems.map(item => {
-      const replies = item.replies?.comments || [];
-      const answeredByMe = replies.some(r => r.snippet.authorChannelId?.value === MY_CHANNEL_ID);
-      return {
-        id: item.id,
-        videoId: item.snippet.videoId,
-        text: item.snippet.topLevelComment.snippet.textDisplay,
-        author: item.snippet.topLevelComment.snippet.authorDisplayName,
-        authorPhoto: item.snippet.topLevelComment.snippet.authorProfileImageUrl,
-        publishedAt: item.snippet.topLevelComment.snippet.publishedAt,
-        likeCount: item.snippet.topLevelComment.snippet.likeCount,
-        replyCount: item.snippet.totalReplyCount,
-        answeredByMe,
-        answered: answeredByMe || state.answered.includes(item.id),
-        network: 'yt'
-      };
-    });
-
-    // Ordenar: primero los no respondidos más nuevos, luego los respondidos
-    comments.sort((a, b) => {
-      if (a.answered !== b.answered) return a.answered ? 1 : -1;
-      return new Date(b.publishedAt) - new Date(a.publishedAt);
-    });
-
-    console.log(`[yt/comments] ${pagesChecked} página(s), ${comments.filter(c=>!c.answered).length} sin responder`);
-    res.json({ comments, nextPageToken: lastNextPageToken });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/comments/:id/reply', requireAuth, async (req, res) => {
-  const { id } = req.params;
-  const { text, commentText } = req.body;
-  console.log(`[reply] id=${id} text="${text}" commentText="${commentText}" userEdited=${req.body.userEdited} videoTitle="${req.body.videoTitle}"`);
-  try {
-    const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
-    console.log('[reply] llamando a youtube.comments.insert...');
-    await youtube.comments.insert({
-      part: 'snippet',
-      requestBody: { snippet: { parentId: id, textOriginal: text } }
-    });
-    console.log('[reply] youtube ok. llamando a markAnswered...');
-    const source = req.body.userEdited ? 'javi' : 'ai';
-    await markAnswered(id, commentText || '', text, req.body.videoTitle || '', source);
-    console.log('[reply] markAnswered ok. source=' + source);
-    // Clasificar en background sin bloquear la respuesta
-    if (source === 'javi' && commentText) {
-      clasificarComentario(commentText).then(cat => actualizarCategoria(id, cat)).catch(() => {});
-    }
-    res.json({ ok: true });
-  } catch (e) {
-    console.error('[reply] ERROR:', e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/video/:id', requireAuth, async (req, res) => {
-  try {
-    const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
-    const response = await youtube.videos.list({ part: 'snippet', id: req.params.id });
-    const video = response.data.items[0];
-    res.json({ title: video?.snippet?.title || 'Sin titulo' });
-  } catch (e) {
-    res.json({ title: 'Video' });
-  }
-});
-
-app.get('/channel/videos', requireAuth, async (req, res) => {
-  try {
-    const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
-    const { pageToken, duration } = req.query;
-    const baseParams = {
-      part: 'snippet',
-      channelId: process.env.YOUTUBE_CHANNEL_ID,
-      type: 'video',
-      order: 'date',
-      maxResults: 50,
-      pageToken: pageToken || undefined
-    };
-
-    let items = [];
-    let nextPageToken = null;
-
-    if (duration === 'long') {
-      // Traer medium (4-20 min) y long (>20 min) en paralelo y combinar
-      const [resMedium, resLong] = await Promise.all([
-        youtube.search.list({ ...baseParams, videoDuration: 'medium' }),
-        youtube.search.list({ ...baseParams, videoDuration: 'long' })
-      ]);
-      items = [...(resMedium.data.items || []), ...(resLong.data.items || [])];
-      // Ordenar por fecha descendente
-      items.sort((a, b) => new Date(b.snippet.publishedAt) - new Date(a.snippet.publishedAt));
-      nextPageToken = resMedium.data.nextPageToken || resLong.data.nextPageToken || null;
-    } else {
-      const response = await youtube.search.list(baseParams);
-      items = response.data.items || [];
-      nextPageToken = response.data.nextPageToken || null;
-    }
-
-    const videos = items.map(item => ({
-      id: item.id.videoId,
-      title: item.snippet.title,
-      publishedAt: item.snippet.publishedAt,
-      thumbnail: item.snippet.thumbnails?.default?.url || ''
-    }));
-    res.json({ videos, nextPageToken });
-  } catch (e) {
-    console.error('channel/videos error:', e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/video/:id/comments', requireAuth, async (req, res) => {
-  try {
-    const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
-    const { pageToken } = req.query;
-    const response = await youtube.commentThreads.list({
-      part: 'snippet,replies',
-      videoId: req.params.id,
-      maxResults: 100,
-      order: 'time',
-      pageToken: pageToken || undefined
-    });
-    const state = await getState();
-    const comments = response.data.items.map(item => {
-      const replies = item.replies?.comments || [];
-      const answeredByMe = replies.some(r => r.snippet.authorChannelId?.value === MY_CHANNEL_ID);
-      return {
-        id: item.id,
-        videoId: req.params.id,
-        text: item.snippet.topLevelComment.snippet.textDisplay,
-        author: item.snippet.topLevelComment.snippet.authorDisplayName,
-        authorPhoto: item.snippet.topLevelComment.snippet.authorProfileImageUrl,
-        publishedAt: item.snippet.topLevelComment.snippet.publishedAt,
-        likeCount: item.snippet.topLevelComment.snippet.likeCount,
-        replyCount: item.snippet.totalReplyCount,
-        answeredByMe,
-        answered: answeredByMe || state.answered.includes(item.id),
-        network: 'yt'
-      };
-    });
-    res.json({ comments, nextPageToken: response.data.nextPageToken || null });
-  } catch (e) {
-    console.error('video comments error:', e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-const FB_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
-const FB_PAGE_ID = (process.env.FB_PAGE_ID || '').trim();
-const IG_USER_ID = (process.env.IG_USER_ID || '').trim();
-const IG_TOKEN = (process.env.IG_ACCESS_TOKEN || '').trim();
-
-// Trae comentarios de un post, más nuevos primero
-async function fetchAllPostComments(postId, token) {
-  const url = `https://graph.facebook.com/v19.0/${postId}/comments?fields=id,message,from,created_time,comments{id,from}&limit=50&order=reverse_chronological&access_token=${token}`;
-  const r = await fetch(url);
-  const data = await r.json();
-  if (!r.ok || !data.data) return [];
-  return data.data;
-}
-
-app.get('/fb/comments', async (req, res) => {
-  try {
-    const { after } = req.query;
-    const state = await getState();
-    const comments = [];
-    const seenIds = new Set();
-    let nextCursor = null;
-    let pageUrl = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time&limit=20&access_token=${FB_TOKEN}`;
-    if (after) pageUrl += `&after=${after}`;
-    let pagesChecked = 0;
-    const MAX_PAGES = 5; // máximo 100 posts por request
-
-    const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
-    while (pageUrl && pagesChecked < MAX_PAGES) {
-      const r = await fetch(pageUrl);
-      const data = await r.json();
-      if (!r.ok) {
-        console.error('FB error:', JSON.stringify(data));
-        return res.status(500).json({ error: data.error?.message || 'Error de Facebook' });
+    // Traer ejemplos de matching aprobados por Javi para cada FAQ
+    let faqExamples = {};
+    try {
+      const exRows = await pool.query('SELECT faq_id, comment_text FROM faq_examples ORDER BY created_at DESC LIMIT 50');
+      for (const ex of exRows.rows) {
+        if (!faqExamples[ex.faq_id]) faqExamples[ex.faq_id] = [];
+        faqExamples[ex.faq_id].push(ex.comment_text);
       }
+    } catch(e) {} // tabla puede no existir aún
 
-      const posts = data.data || [];
-      const allPostComments = await Promise.all(posts.map(post => fetchAllPostComments(post.id, FB_TOKEN).then(cs => ({ post, cs }))));
-      for (const { post, cs } of allPostComments) {
-        for (const c of cs) {
-          if (seenIds.has(c.id)) continue;
-          if (new Date(c.created_time).getTime() < thirtyDaysAgo) continue;
-          if (c.from?.id === FB_PAGE_ID) continue;
-          const replies = c.comments?.data || [];
-          const answeredByMe = replies.some(r => r.from?.id === FB_PAGE_ID);
-          if (answeredByMe) continue;
-          if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
-          seenIds.add(c.id);
-          comments.push({
-            id: c.id,
-            postId: post.id,
-            postMessage: post.message || '',
-            text: c.message,
-            author: c.from?.name || 'Usuario',
-            authorPhoto: `https://graph.facebook.com/${c.from?.id}/picture?type=square`,
-            publishedAt: c.created_time,
-            network: 'fb'
-          });
-        }
-      }
+    // Construir lista de todas las FAQs en una sola llamada — más eficiente y más contexto
+    const faqList = faqs.rows.map((f, i) => {
+      const examples = faqExamples[f.id] || [];
+      const exBlock = examples.length > 0 ? ' | Ejemplos reales: ' + examples.slice(0,3).map(e => '"'+e+'"').join(', ') : '';
+      return `${i+1}. Pregunta: "${f.pregunta}" | Intención: "${f.keywords}"${exBlock}`;
+    }).join('\n');
+    
+    const matchPrompt = `Sos un clasificador de comentarios para el canal de YouTube/Facebook de Javi, un joyero argentino.
 
-      nextCursor = data.paging?.cursors?.after || null;
-      pageUrl = data.paging?.next || null;
-      pagesChecked++;
-    }
+Tu tarea: determinar si el comentario siguiente corresponde a alguna de estas preguntas frecuentes del canal.
 
-    // Agregar comentarios de reels
-    const reelsResFB = await fetch(`https://graph.facebook.com/v19.0/${FB_PAGE_ID}/video_reels?fields=id,description,created_time&limit=50&access_token=${FB_TOKEN}`);
-    const reelsDataFB = await reelsResFB.json();
-    if (reelsResFB.ok && reelsDataFB.data) {
-      const allReelComments = await Promise.all(reelsDataFB.data.map(reel => fetchAllPostComments(reel.id, FB_TOKEN).then(cs => ({ reel, cs }))));
-      for (const { reel, cs } of allReelComments) {
-        for (const c of cs) {
-          if (seenIds.has(c.id)) continue;
-          if (new Date(c.created_time).getTime() < thirtyDaysAgo) continue;
-          if (c.from?.id === FB_PAGE_ID) continue;
-          const replies = c.comments?.data || [];
-          const answeredByMe = replies.some(r => r.from?.id === FB_PAGE_ID);
-          if (answeredByMe) continue;
-          if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
-          seenIds.add(c.id);
-          comments.push({
-            id: c.id,
-            postId: reel.id,
-            postMessage: reel.description || '',
-            text: c.message,
-            author: c.from?.name || 'Usuario',
-            authorPhoto: `https://graph.facebook.com/${c.from?.id}/picture?type=square`,
-            publishedAt: c.created_time,
-            network: 'fb'
-          });
-        }
-      }
-    }
+PREGUNTAS FRECUENTES:
+${faqList}
 
-    // Ordenar por más nuevos primero y devolver los primeros 20
-    comments.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
-    const top20 = comments.slice(0, 20);
+COMENTARIO: "${comment.substring(0, 300)}"
 
-    console.log(`[fb/comments] ${comments.length} encontrados en ${pagesChecked} página(s), devolviendo ${top20.length} más nuevos`);
-    res.json({ comments: top20, nextCursor });
-  } catch (e) {
-    console.error('fb/comments error:', e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
+REGLAS IMPORTANTES:
+- Analizá la INTENCIÓN del comentario, no solo las palabras exactas
+- Un comentario corto o vago puede igualmente corresponder a una FAQ si el tema coincide
+- Considerá el contexto: es un canal de joyería que trabaja con ácidos, metales y procesos químicos
+- Si el comentario toca el tema de una FAQ aunque sea de forma indirecta, contá como match
 
-app.get('/fb/comments/old', async (req, res) => {
-  try {
-    const state = await getState();
-    const comments = [];
-    const seenIds = new Set();
-    let pageUrl = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time&limit=20&access_token=${FB_TOKEN}`;
-    let pagesChecked = 0;
-    const MAX_PAGES = 5;
-    const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+Si corresponde a alguna FAQ, respondé SOLO el número (ej: "1" o "2"). Si no corresponde a ninguna, respondé SOLO "no".`;
 
-    while (pageUrl && pagesChecked < MAX_PAGES) {
-      const r = await fetch(pageUrl);
-      const data = await r.json();
-      if (!r.ok) return res.status(500).json({ error: data.error?.message || 'Error de Facebook' });
-
-      const posts = data.data || [];
-      const allPostComments = await Promise.all(posts.map(post => fetchAllPostComments(post.id, FB_TOKEN).then(cs => ({ post, cs }))));
-      for (const { post, cs } of allPostComments) {
-        for (const c of cs) {
-          if (seenIds.has(c.id)) continue;
-          if (new Date(c.created_time).getTime() >= thirtyDaysAgo) continue;
-          if (c.from?.id === FB_PAGE_ID) continue;
-          const replies = c.comments?.data || [];
-          if (replies.some(r => r.from?.id === FB_PAGE_ID)) continue;
-          if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
-          seenIds.add(c.id);
-          comments.push({ id: c.id, postId: post.id, postMessage: post.message || '', text: c.message, author: c.from?.name || 'Usuario', authorPhoto: `https://graph.facebook.com/${c.from?.id}/picture?type=square`, publishedAt: c.created_time, network: 'fb' });
-        }
-      }
-      pageUrl = data.paging?.next || null;
-      pagesChecked++;
-    }
-
-    const reelsRes = await fetch(`https://graph.facebook.com/v19.0/${FB_PAGE_ID}/video_reels?fields=id,description,created_time&limit=50&access_token=${FB_TOKEN}`);
-    const reelsData = await reelsRes.json();
-    if (reelsRes.ok && reelsData.data) {
-      const allReelComments = await Promise.all(reelsData.data.map(reel => fetchAllPostComments(reel.id, FB_TOKEN).then(cs => ({ reel, cs }))));
-      for (const { reel, cs } of allReelComments) {
-        for (const c of cs) {
-          if (seenIds.has(c.id)) continue;
-          if (new Date(c.created_time).getTime() >= thirtyDaysAgo) continue;
-          if (c.from?.id === FB_PAGE_ID) continue;
-          const replies = c.comments?.data || [];
-          if (replies.some(r => r.from?.id === FB_PAGE_ID)) continue;
-          if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
-          seenIds.add(c.id);
-          comments.push({ id: c.id, postId: reel.id, postMessage: reel.description || '', text: c.message, author: c.from?.name || 'Usuario', authorPhoto: `https://graph.facebook.com/${c.from?.id}/picture?type=square`, publishedAt: c.created_time, network: 'fb' });
-        }
-      }
-    }
-
-    comments.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
-    const top20 = comments.slice(0, 20);
-    console.log(`[fb/comments/old] ${comments.length} encontrados, devolviendo ${top20.length}`);
-    res.json({ comments: top20 });
-  } catch (e) {
-    console.error('fb/comments/old error:', e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/fb/comments/:id/reply', async (req, res) => {
-  const { id } = req.params;
-  const { text, commentText } = req.body;
-  try {
-    const r = await fetch(`https://graph.facebook.com/v19.0/${id}/comments`, {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ message: text, access_token: FB_TOKEN })
+      headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5',
+        max_tokens: 5,
+        messages: [{ role: 'user', content: matchPrompt }]
+      })
     });
     const data = await r.json();
-    if (!r.ok) {
-      console.error('FB reply error:', JSON.stringify(data));
-      return res.status(500).json({ error: data.error?.message || 'Error al responder' });
+    const answer = (data.content?.[0]?.text || '').trim().toLowerCase();
+    
+    if (answer === 'no' || answer === '') return null;
+    
+    const idx = parseInt(answer) - 1;
+    if (!isNaN(idx) && faqs.rows[idx]) {
+      const faq = faqs.rows[idx];
+      const respuesta = faq.respuestas[Math.floor(Math.random() * faq.respuestas.length)];
+      console.log('[agent] FAQ match "' + faq.pregunta.substring(0, 40) + '" para: "' + comment.substring(0, 40) + '"');
+      return respuesta;
     }
-    const source = req.body.userEdited ? 'javi' : 'ai';
-    await markAnswered(id, commentText || '', text, req.body.videoTitle || '', source);
-    // Clasificar en background sin bloquear la respuesta
-    if (source === 'javi' && commentText) {
-      clasificarComentario(commentText).then(cat => actualizarCategoria(id, cat)).catch(() => {});
-    }
-    res.json({ ok: true });
-  } catch (e) {
-    console.error('fb reply error:', e.message);
-    res.status(500).json({ error: e.message });
+    return null;
+  } catch(e) {
+    console.error('[agent] checkFAQ error:', e.message);
+    return null;
   }
-});
-
-async function fetchIGMediaComments(mediaId, token) {
-  const allComments = [];
-  let url = `https://graph.instagram.com/v19.0/${mediaId}/comments?fields=id,text,username,timestamp&limit=50&access_token=${token}`;
-  let page = 0;
-  const MAX_PAGES = 10;
-  while (url && page < MAX_PAGES) {
-    const r = await fetch(url);
-    const data = await r.json();
-    console.log(`[ig/fetchComments] media=${mediaId} page=${page} ok=${r.ok} count=${data.data?.length ?? 'N/A'} error=${data.error?.message || 'none'}`);
-    if (!r.ok || !data.data) break;
-    allComments.push(...data.data);
-    url = data.paging?.next || null;
-    page++;
-  }
-  return allComments;
 }
 
-app.get('/ig/comments', async (req, res) => {
-  // DESACTIVADO temporalmente — la integración IG está en revisión
-  console.log('[ig/comments] endpoint desactivado temporalmente');
-  res.json({ comments: [], nextCursor: null });
-});
+// ─── GENERADOR DE RESPUESTA ─────────────────────────────────────────────────
+// Usa exactamente el mismo prompt y lógica que /suggest-reply — el que ya funcionaba bien
 
-app.get('/ig/test-fb', async (req, res) => {
-  try {
-    // Paso 1: obtener IG Business Account ID desde la página de Facebook
-    const pageRes = await fetch(`https://graph.facebook.com/v19.0/${FB_PAGE_ID}?fields=instagram_business_account&access_token=${FB_TOKEN}`);
-    const pageData = await pageRes.json();
-    console.log('[ig/test-fb] page:', JSON.stringify(pageData));
-    const igAccountId = pageData.instagram_business_account?.id;
-    if (!igAccountId) return res.json({ error: 'No IG business account linked', pageData });
-
-    // Paso 2: traer media con ese ID
-    const mediaRes = await fetch(`https://graph.facebook.com/v19.0/${igAccountId}/media?fields=id,caption,timestamp,comments_count&limit=5&access_token=${FB_TOKEN}`);
-    const mediaData = await mediaRes.json();
-    console.log('[ig/test-fb] media:', JSON.stringify(mediaData));
-    if (!mediaData.data?.length) return res.json({ igAccountId, media: mediaData });
-
-    // Paso 3: traer comentarios del primer post
-    const firstMedia = mediaData.data[0];
-    const commentsRes = await fetch(`https://graph.facebook.com/v19.0/${firstMedia.id}/comments?fields=id,text,username,timestamp&limit=10&access_token=${FB_TOKEN}`);
-    const commentsData = await commentsRes.json();
-    console.log('[ig/test-fb] comments:', JSON.stringify(commentsData));
-
-    res.json({ igAccountId, firstMedia, comments: commentsData });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/ig/comments/:id/reply', async (req, res) => {
-  // DESACTIVADO temporalmente — la integración IG está en revisión
-  console.log('[ig/reply] endpoint desactivado temporalmente');
-  res.json({ ok: false, error: 'Instagram temporalmente desactivado' });
-});
-
-const makeComments = [];
-
-app.post('/webhook/facebook-make', (req, res) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  const c = req.body;
-  if (!c || !c.id) return res.status(400).json({ error: 'Datos invalidos' });
-  const exists = makeComments.find(x => x.id === c.id);
-  if (!exists) {
-    makeComments.push({
-      id: c.id, text: c.text || '', author: c.author || 'Usuario',
-      authorId: c.authorId || '', postId: c.postId || '',
-      publishedAt: c.publishedAt || new Date().toISOString(), network: 'fb'
+async function generateReply(comment, postContext, examples) {
+  // Construir bloque de ejemplos con los aprobados por Javi (prioridad agente, luego histórico)
+  let ejemplosBloque = '';
+  if (examples.length > 0) {
+    ejemplosBloque = '\n\nAPRENDÉ EL TONO de estos ejemplos reales de Javi. No copies ninguno igual — usalos como guía de estilo:\n';
+    examples.forEach((ex, i) => {
+      ejemplosBloque += '\nEjemplo ' + (i+1) + ':' + (ex.post_title ? '\n(Post: ' + ex.post_title + ')' : '') + '\nComentario: "' + ex.comment_text + '"\nRespuesta: "' + ex.reply_text + '"\n';
     });
   }
-  res.json({ ok: true });
-});
 
-app.get('/fb/make-comments', async (req, res) => {
-  try {
-    const state = await getState();
-    const filtered = makeComments
-      .filter(c => !state.discarded.includes(c.id))
-      .map(c => ({ ...c, answered: state.answered.includes(c.id) }));
-    res.json({ comments: filtered });
-  } catch(e) {
-    res.json({ comments: [] });
-  }
-});
+  // Contexto del post si existe
+  const contextBlock = postContext && postContext.title
+    ? '\n[Contexto del post: ' + postContext.title + ' — ' + (postContext.typical_comments || '') + ']'
+    : '';
 
-app.get('/webhook/facebook', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-  if (mode === 'subscribe' && token === 'sudaca2024') {
-    res.status(200).send(challenge);
-  } else {
-    res.status(403).send('Forbidden');
-  }
-});
-
-app.post('/webhook/facebook', (req, res) => {
-  res.status(200).send('EVENT_RECEIVED');
-});
-
-app.post('/suggest-reply', async (req, res) => {
-  const { comment, commentText } = req.body;
-  if (!comment) return res.status(400).json({ error: 'Falta el comentario' });
-
-  const apiKey = (process.env.ANTHROPIC_API_KEY || '').trim();
-
-  let ejemplosBloque = '';
-  try {
-    const categoria = await clasificarComentario(comment);
-    console.log(`[suggest] categoria detectada: ${categoria}`);
-    const examples = await getExamples(20, categoria);
-    console.log(`[suggest] ejemplos cargados: ${examples.length} (categoria: ${categoria})`);
-    if (examples.length > 0) {
-      ejemplosBloque = '\n\nAPRENDÉ EL TONO de estos ejemplos reales de Javi. No copies ninguno igual — usalos como guía de estilo:\n';
-      examples.forEach((ex, i) => {
-        ejemplosBloque += `\nEjemplo ${i+1}:${ex.video_title ? "\n(Video: "+ex.video_title+")" : ""}\nComentario: "${ex.comment_text}"\nRespuesta: "${ex.reply_text}"\n`;
-      });
-    }
-  } catch(e) { console.log('[suggest] error cargando ejemplos:', e.message); }
-
-  const prompt = `Sos Javi (Javier Romero), joyero argentino del canal Joyeria Sudaca. Tu tono es casual, directo, rioplatense natural — sin exagerar el acento, sin sonar a robot.${ejemplosBloque}
+  const prompt = 'Sos Javi (Javier Romero), joyero argentino del canal Joyeria Sudaca. Tu tono es casual, directo, rioplatense natural — sin exagerar el acento, sin sonar a robot.' + contextBlock + ejemplosBloque + `
 
 CATEGORÍAS Y VARIACIONES — elegí UNA al azar de la categoría que corresponda:
 
 Elogios o felicitaciones:
 - "muchas gracias me alegro que te guste mi contenido"
 - "gracias por el aguante, me pone muy feliz que te guste"
-- "muchas gracias bro, un abrazo grande"
-- "gracias de verdad, me pone muy feliz que me digas esto"
-- "increíble lo que me decís, muchas gracias por el aguante!!!"
+- "muchas gracias bro, un abrazo grande 🙌"
+- "gracias de verdad, me pone muy feliz que me digas esto 😄"
+- "increíble lo que me decís, muchas gracias por el aguante!!! 💪"
 
 Yeti / Híbrido:
 - "jajaja me suelen decir que me parezco al yeti, es verdad"
@@ -766,7 +330,7 @@ Joyería Sudaca / aguante sudaca:
 - "100% sudacas"
 - "esto es joyería sudaca papá"
 - "todos somos joyería sudaca"
-- "claro que sí"
+- "claro que sí 💪"
 
 Cuestionan que no explico bien el proceso o piden más detalle:
 - "este video no es un tutorial ni un curso, es una forma de hacer que más gente conozca el oficio"
@@ -774,13 +338,13 @@ Cuestionan que no explico bien el proceso o piden más detalle:
 - "son videos entretenidos para que más gente conozca el oficio, no se puede hacer un curso en 30 segundos"
 
 Quieren empezar en joyería / piden consejos:
-- "si te lo proponés lo podés lograr, metele para adelante"
+- "si te lo proponés lo podés lograr, metele para adelante 💪"
 - "se empieza por el principio, metele y ya vas a lograr hacer tus primeras piezas"
-- "metele, si te gusta el oficio siempre se puede aprender"
+- "metele, si te gusta el oficio siempre se puede aprender 🙌"
 
 Elogian mi forma de narrar / el speech:
 - "muchas gracias mi hermano, me pone contento que te guste la forma que tengo de explicar"
-- "jaja me alegro bro, muchas gracias"
+- "jaja me alegro bro, muchas gracias 😄"
 - "la verdad que sí, si me pongo a escuchar lo que digo es gracioso jaja"
 
 REGLAS:
@@ -802,412 +366,561 @@ REGLAS:
 - "Por qué no fundís directo?" → "Si solo fundimos no podemos garantizar la pureza del metal"
 - Pepetools → "Está en mi bio, cupón vanallen 10% de descuento"
 - Saludo desde otro país → variación de "me alegro que te guste el contenido, abrazo grande"
+- IDIOMA: detectá el idioma del comentario y respondé EN ESE MISMO IDIOMA. Si no es español, usá respuestas genéricas y cortas.
 
 INSTRUCCIÓN: UNA SOLA respuesta lista para publicar, sin comillas ni explicaciones.
 Comentario: ${comment}`;
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01'
-      },
+      headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
+        model: selectModel(comment, postContext),
         max_tokens: 150,
         messages: [{ role: 'user', content: prompt }]
       })
     });
-    const data = await response.json();
-    if (!response.ok) {
-      return res.status(500).json({ error: data.error?.message || 'Error de API' });
+    const data = await r.json();
+    const text = data.content?.[0]?.text?.trim() || null;
+    if (!text) return null;
+
+    // Validar que no sea texto del prompt filtrado
+    const invalidPhrases = [
+      'esperando el comentario',
+      'comentario a responder',
+      'instrucción:',
+      'instruccion:',
+      'categorías y variaciones',
+      'como javi',
+      'respondé como',
+      'responder como javi',
+      'sos javi',
+    ];
+    const textLower = text.toLowerCase();
+    if (invalidPhrases.some(p => textLower.includes(p))) {
+      console.error('[agent] respuesta inválida descartada:', text.substring(0, 80));
+      return null;
     }
-    res.json({ suggestion: data.content?.[0]?.text || '' });
+
+    // Validar longitud mínima y máxima
+    if (text.length < 3 || text.length > 500) return null;
+
+    return text;
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    console.error('[agent] generateReply error:', e.message);
+    return null;
   }
-});
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// ENDPOINTS DEL AGENTE AUTÓNOMO
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// Disparar ciclo manualmente (también lo llama el cron)
-app.post('/agent/run', async (req, res) => {
-  const network = req.body?.network || 'fb';
-  console.log(`[agent/run] disparado manualmente - network: ${network}`);
-  try {
-    const result = await agent.runAgent(network);
-    res.json({ ok: true, ...result });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
-
-// Estado y estadísticas del agente
-app.get('/agent/stats', async (req, res) => {
-  try {
-    const stats = await agent.getAgentStats();
-    res.json(stats);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Cola de revisión pendiente
-app.get('/agent/queue', async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT * FROM review_queue 
-      WHERE status = 'pending' 
-      ORDER BY confidence DESC, created_at DESC
-    `);
-    res.json({ queue: result.rows });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// 👍 Aprobar respuesta — postea en FB y aprende
-app.post('/agent/approve', async (req, res) => {
-  const { commentId, replyText } = req.body;
-  if (!commentId || !replyText) return res.status(400).json({ error: 'Faltan datos' });
-  try {
-    await agent.approveReply(commentId, replyText);
-    res.json({ ok: true, learned: true });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// 👎 Rechazar — genera 3 variaciones nuevas
-app.post('/agent/reject', async (req, res) => {
-  const { commentId } = req.body;
-  if (!commentId) return res.status(400).json({ error: 'Falta commentId' });
-  try {
-    const variations = await agent.rejectAndRegenerate(commentId);
-    res.json({ ok: true, variations });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Descartar un comentario de la cola (spam, irrelevante)
-app.post('/agent/discard', async (req, res) => {
-  const { commentId } = req.body;
-  if (!commentId) return res.status(400).json({ error: 'Falta commentId' });
-  try {
-    await pool.query(`UPDATE review_queue SET status = 'discarded' WHERE id = $1`, [commentId]);
-    await markDiscarded(commentId);
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Historial de runs del agente
-app.get('/agent/runs', async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT * FROM agent_runs ORDER BY started_at DESC LIMIT 20
-    `);
-    res.json({ runs: result.rows });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Test de conexión Telegram
-// Migración única — copia comment_state → reply_examples con source='historico'
-app.post('/agent/migrate-history', async (req, res) => {
-  try {
-    const source = await pool.query(`
-      SELECT id, comment_text, reply_text, video_title, categoria
-      FROM comment_state
-      WHERE status = 'answered'
-        AND comment_text IS NOT NULL AND comment_text != ''
-        AND reply_text IS NOT NULL AND reply_text != ''
-        AND LENGTH(comment_text) > 2
-        AND LENGTH(reply_text) > 2
-    `);
-    let inserted = 0, skipped = 0;
-    for (const row of source.rows) {
-      const exists = await pool.query(
-        `SELECT id FROM reply_examples WHERE comment_text = $1 AND reply_text = $2 LIMIT 1`,
-        [row.comment_text, row.reply_text]
-      );
-      if (exists.rows.length > 0) { skipped++; continue; }
-      await pool.query(`
-        INSERT INTO reply_examples (comment_text, reply_text, post_title, categoria, network, source, approved_at)
-        VALUES ($1, $2, $3, $4, 'yt', 'historico', NOW())
-      `, [row.comment_text, row.reply_text, row.video_title || '', row.categoria || 'otro']);
-      inserted++;
-    }
-    const total = await pool.query(`SELECT COUNT(*) as cnt FROM reply_examples`);
-    console.log(`[migrate] done — inserted: ${inserted}, skipped: ${skipped}, total: ${total.rows[0].cnt}`);
-    res.json({ ok: true, inserted, skipped, total: parseInt(total.rows[0].cnt) });
-  } catch (e) {
-    console.error('[migrate] error:', e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// FAQ — preguntas frecuentes con respuestas canónicas y variaciones
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// Inicializar tabla FAQ
-async function initFAQ() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS faq (
-      id SERIAL PRIMARY KEY,
-      pregunta TEXT NOT NULL,
-      keywords TEXT NOT NULL,
-      respuestas TEXT[] NOT NULL,
-      activa BOOLEAN DEFAULT true,
-      created_at TIMESTAMPTZ DEFAULT NOW()
-    )
-  `);
 }
 
-// Traer todas las FAQs activas
-app.get('/agent/faq', async (req, res) => {
-  try {
-    const result = await pool.query('SELECT * FROM faq WHERE activa = true ORDER BY created_at DESC');
-    res.json({ faqs: result.rows });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
 
-// Crear nueva FAQ
-app.post('/agent/faq', async (req, res) => {
-  const { pregunta, keywords, respuestas } = req.body;
-  if (!pregunta || !respuestas || respuestas.length === 0) return res.status(400).json({ error: 'Faltan datos' });
-  try {
-    const result = await pool.query(
-      'INSERT INTO faq (pregunta, keywords, respuestas) VALUES ($1, $2, $3) RETURNING *',
-      [pregunta, keywords || pregunta, respuestas]
-    );
-    res.json({ ok: true, faq: result.rows[0] });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
+// ─── CALCULAR CONFIANZA ───────────────────────────────────────────────────────
 
-// Editar FAQ
-app.put('/agent/faq/:id', async (req, res) => {
-  const { pregunta, keywords, respuestas } = req.body;
-  try {
-    await pool.query(
-      'UPDATE faq SET pregunta=$1, keywords=$2, respuestas=$3 WHERE id=$4',
-      [pregunta, keywords || pregunta, respuestas, req.params.id]
-    );
-    res.json({ ok: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
+async function calculateConfidence(comment, postId) {
+  const text = comment.toLowerCase();
 
-// Eliminar FAQ
-app.delete('/agent/faq/:id', async (req, res) => {
-  try {
-    await pool.query('UPDATE faq SET activa = false WHERE id = $1', [req.params.id]);
-    res.json({ ok: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
+  // REGLAS DURAS — confianza fija, no necesitan cálculo
 
-// Buscar FAQ que matchee un comentario
-app.post('/agent/faq/match', async (req, res) => {
-  const { comment } = req.body;
-  if (!comment) return res.status(400).json({ match: null });
+  // Solo emojis
+  const soloEmojis = comment.trim().replace(/[🀀-🿿☀-⟿︀-﻿🤀-🧿🨀-🫿 -  -⁯✀-➿ ]/gu, '');
+  if (soloEmojis.length === 0 && comment.trim().length > 0) {
+    console.log('[agent] confianza: 0.95 (solo emojis)');
+    return 0.95;
+  }
+
+  // Elogios claros
+  const esElogio = [
+    /yeti|h.brido/i,
+    /sudaca/i,
+    /genial|excelente|incre.ble|buen.simo|espectacular|crack|capo|groso|grosso/i,
+    /muy buen|buen video|buen contenido|gran video|gran trabajo/i,
+    /me encanta|me gust/i,
+    /sos el mejor|sos un genio|sos un capo|sos un crack/i,
+    /qué bueno|que bueno|qué lindo|que lindo/i,
+    /de donde sos|de d.nde sos|argentina/i,
+    /suscrib/i,
+    /felicit|bravo|brillante|top/i
+  ].some(p => p.test(text));
+
+  if (esElogio && comment.length < 150) {
+    console.log('[agent] confianza: 0.90 (elogio detectado)');
+    return 0.90;
+  }
+
+  // Emojis positivos con texto corto
+  if (/[🔥💪👏❤😍🙌👍⭐🏆]/.test(comment) && comment.length < 60) {
+    console.log('[agent] confianza: 0.82 (emoji positivo corto)');
+    return 0.82;
+  }
+
+  // CÁLCULO NORMAL para el resto
+  const postExamples = await pool.query(
+    'SELECT COUNT(*) as cnt FROM reply_examples WHERE post_id = $1', [postId]
+  );
+  const postExampleCount = parseInt(postExamples.rows[0].cnt);
+  const totalExamples = await pool.query('SELECT COUNT(*) as cnt FROM reply_examples');
+  const total = parseInt(totalExamples.rows[0].cnt);
+
+  let confidence = total >= 100 ? 0.50 : total >= 10 ? 0.40 : 0.25;
+  if (postExampleCount > 0) confidence += 0.15;
+  if (postExampleCount > 5) confidence += 0.10;
+  if (comment.length > 200) confidence -= 0.15;
+  if ((comment.match(/\?/g) || []).length >= 2) confidence -= 0.20;
+
+  console.log('[agent] confianza: ' + confidence.toFixed(2) + ' | total: ' + total + ' | post: ' + postExampleCount);
+  return Math.max(0.1, Math.min(0.95, confidence));
+}
+
+// ─── POSTEAR RESPUESTA EN FB ──────────────────────────────────────────────────
+
+async function postFBReply(commentId, text) {
+  const r = await fetch(`https://graph.facebook.com/v19.0/${commentId}/comments`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ message: text, access_token: FB_TOKEN })
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error?.message || 'FB reply error');
+  return data;
+}
+
+// ─── GUARDAR EN comment_state (compatible con sistema existente) ──────────────
+
+async function saveAsAnswered(id, commentText, replyText, videoTitle) {
+  await pool.query(`
+    INSERT INTO comment_state (id, status, comment_text, reply_text, video_title, source)
+    VALUES ($1, 'answered', $2, $3, $4, 'ai')
+    ON CONFLICT (id) DO UPDATE SET status='answered', reply_text=$3, video_title=$4, source='ai'
+  `, [id, commentText || '', replyText || '', videoTitle || '']);
+}
+
+// ─── FILTRO DE RESIDUOS QUÍMICOS — RESPUESTA FIJA ────────────────────────────
+// Nunca pasa por el modelo. Responde siempre con texto exacto aprobado por Javi.
+
+const WASTE_RESPONSES = [
+  'claro que no lo tiro al inodoro, por favor! El ácido se neutraliza y se almacena para luego ser entregado a una empresa que se encarga de su neutralización final 💪',
+  'jamás al desagüe! Se neutraliza y va a disposición final con empresa especializada 🙌',
+  'eso nunca, se neutraliza con bicarbonato y se entrega a empresa de disposición final 👋'
+];
+
+function isWasteQuestion(comment) {
+  const text = comment.toLowerCase();
+  // Debe mencionar residuos/descarte Y contexto químico
+  const residuoPatterns = [
+    /tir(á|a|as|o)\s*(el\s*)?(ácido|acido|líquido|liquido|residuo|desecho)/,
+    /qué\s*hac(é|e)s?\s*(con\s*)?(el\s*)?(ácido|acido|residuo|desecho|líquido)/,
+    /cómo\s*(descart|eliminá|tir)/,
+    /inodoro|cañería|caneria|desagüe|desague|alcantarilla/,
+    /residuo|desecho|descarte|neutraliza/,
+    /contamina|medio\s*ambiente|ecolog/
+  ];
+  const acidContext = /ácido|acido|químico|quimico|nitrico|sulfúrico|sulfurico|solución|solucion/.test(text);
+  return residuoPatterns.some(p => p.test(text)) && (acidContext || /residuo|desecho|neutraliza/.test(text));
+}
+
+// ─── FILTRO DE SEGURIDAD QUÍMICA ─────────────────────────────────────────────
+// Comentarios con contenido químico/peligroso van SIEMPRE a cola, nunca auto-responden
+// Es un filtro de código — no depende del modelo
+
+function isChemicalRisk(comment) {
+  const text = comment.toLowerCase();
+  const patterns = [
+    // Ácidos y químicos
+    /ácido|acido|nitrico|sulfúrico|sulfurico|clorhídrico|clorhidrico|fluorhídrico|fluorhidrico/,
+    /agua regia|aqua regia|cianuro|cianur/,
+    /hidróxido|hidroxido|soda caustica|soda cáustica|lejía|lejia/,
+    /peróxido|peroxido|h2o2|hno3|h2so4|hcl/,
+    // Procesos peligrosos
+    /fundir|fundición|fundicion|derretir|derretí/,
+    /temperatura|grados|celsius|fahrenheit|°c|°f/,
+    /mezcl|combina|disuelv|diluí|dilui/,
+    /electrolisis|electrólisis|electrolit/,
+    /cloro|amoniaco|amoníaco/,
+    // Metales y procesos de refinado
+    /refinar|refinado|purificar|pureza|quilate|karat/,
+    /mercurio|plomo|arsénico|arsenico|cadmio/,
+    /soldar|soldadura|flux|borax|bórax/,
+    /decapar|decapado|mordiente/,
+    // Vapores y gases
+    /vapor|gas|humo|ventilación|ventilacion|respirar|inhalar/,
+    /tóxico|toxico|veneno|peligro|quemadura/
+  ];
+  return patterns.some(p => p.test(text));
+}
+
+// ─── CICLO PRINCIPAL DEL AGENTE ───────────────────────────────────────────────
+
+async function runAgent(network = 'fb') {
+  console.log(`[agent] ▶ INICIO ciclo ${network} - ${new Date().toISOString()}`);
+
+  // Log de inicio
+  const runResult = await pool.query(
+    `INSERT INTO agent_runs (network) VALUES ($1) RETURNING id`, [network]
+  );
+  const runId = runResult.rows[0].id;
+
+  let fetched = 0, autoReplied = 0, queued = 0, skipped = 0;
+
   try {
-    const faqs = await pool.query('SELECT * FROM faq WHERE activa = true');
-    const text = comment.toLowerCase();
-    let best = null;
-    for (const faq of faqs.rows) {
-      const keys = faq.keywords.toLowerCase().split(',').map(k => k.trim()).filter(Boolean);
-      const matches = keys.filter(k => text.includes(k));
-      if (matches.length > 0 && (!best || matches.length > best.matchCount)) {
-        best = { ...faq, matchCount: matches.length };
+    // ── 1. TRAER COMENTARIOS ──────────────────────────────────────────────────
+    // Solo traer IDs respondidos/descartados en los últimos 60 días para no bloquear todo
+    const state = await pool.query(`
+      SELECT id, status FROM comment_state 
+      WHERE created_at > NOW() - INTERVAL '60 days'
+    `);
+    const answeredIds = new Set(state.rows.filter(r => r.status === 'answered').map(r => r.id));
+    const discardedIds = new Set(state.rows.filter(r => r.status === 'discarded').map(r => r.id));
+
+    // También chequear review_queue para no procesar dos veces
+    const inQueue = await pool.query(`SELECT id FROM review_queue WHERE status = 'pending'`);
+    const queuedIds = new Set(inQueue.rows.map(r => r.id));
+    
+    console.log('[agent] filtros cargados — answered:', answeredIds.size, '| discarded:', discardedIds.size, '| inQueue:', queuedIds.size);
+
+    let comments = [];
+
+    if (network === 'fb') {
+      comments = await fetchFBComments(answeredIds, discardedIds, queuedIds);
+    }
+    // YT se puede agregar después con el mismo patrón
+
+    fetched = comments.length;
+    console.log(`[agent] comentarios nuevos a procesar: ${fetched}`);
+
+    if (fetched === 0) {
+      await finishRun(runId, 0, 0, 0, 0);
+      console.log('[agent] nada nuevo, saliendo');
+      return { fetched: 0, autoReplied: 0, queued: 0, skipped: 0 };
+    }
+
+    // ── 2. AGRUPAR COMENTARIOS SIMILARES POR POST ─────────────────────────────
+    const byPost = {};
+    for (const c of comments) {
+      if (!byPost[c.postId]) byPost[c.postId] = [];
+      byPost[c.postId].push(c);
+    }
+
+    // ── 3. PROCESAR CADA COMENTARIO ───────────────────────────────────────────
+    for (const [postId, postComments] of Object.entries(byPost)) {
+      const firstComment = postComments[0];
+
+      // Construir/recuperar contexto del post
+      const postContext = await getOrBuildPostContext(postId, firstComment.postMessage, network);
+
+      // Agrupar similares dentro del post (para no responder 50 veces lo mismo)
+      const processed = new Set();
+
+      for (const comment of postComments) {
+        if (processed.has(comment.id)) continue;
+
+        // Buscar ejemplos aprendidos
+        const examples = await getLearnedExamples(postId, comment.text);
+
+        // Filtro de seguridad química — va siempre a cola, nunca auto-responde
+        const chemRisk = isChemicalRisk(comment.text);
+        if (chemRisk) {
+          console.log(`[agent] ⚠️ riesgo químico detectado, mandando a cola: "${comment.text.substring(0, 50)}"`);
+        }
+
+        // Filtro de residuos — respuesta fija, nunca pasa por el modelo
+        if (isWasteQuestion(comment.text)) {
+          const wasteReply = WASTE_RESPONSES[Math.floor(Math.random() * WASTE_RESPONSES.length)];
+          try {
+            await postFBReply(comment.id, wasteReply);
+            await saveAsAnswered(comment.id, comment.text, wasteReply, postContext.title);
+            autoReplied++;
+            console.log('[agent] ✅ residuos (respuesta fija): "' + comment.text.substring(0, 50) + '"');
+          } catch(e) {
+            await addToQueue(comment, postContext, wasteReply, 0.99, 'residuos_fijo');
+            queued++;
+          }
+          processed.add(comment.id);
+          await new Promise(r => setTimeout(r, 500));
+          continue;
+        }
+
+        // Chequear FAQ primero — respuesta canónica si hay match
+        const faqReply = await checkFAQ(comment.text);
+        if (faqReply && !chemRisk) {
+          try {
+            await postFBReply(comment.id, faqReply);
+            await saveAsAnswered(comment.id, comment.text, faqReply, postContext.title);
+            autoReplied++;
+            console.log('[agent] ✅ FAQ auto-respondido: "' + comment.text.substring(0, 50) + '"');
+          } catch(e) {
+            await addToQueue(comment, postContext, faqReply, 0.95, 'faq_match');
+            queued++;
+          }
+          processed.add(comment.id);
+          await new Promise(r => setTimeout(r, 500));
+          continue;
+        }
+
+        // Calcular confianza
+        const confidence = chemRisk ? 0 : await calculateConfidence(comment.text, postId);
+
+        // Generar respuesta
+        const reply = await generateReply(comment.text, postContext, examples);
+
+        if (!reply) {
+          skipped++;
+          processed.add(comment.id);
+          continue;
+        }
+
+        if (confidence >= 0.55 && !chemRisk) {
+          // ── AUTO-RESPONDER ──────────────────────────────────────────────────
+          try {
+            await postFBReply(comment.id, reply);
+            await saveAsAnswered(comment.id, comment.text, reply, postContext.title);
+            autoReplied++;
+            console.log(`[agent] ✅ auto-respondido: "${comment.text.substring(0, 50)}..."`);
+          } catch (e) {
+            console.error(`[agent] error posteando:`, e.message);
+            // Si falla el posteo, mandar a cola de revisión
+            await addToQueue(comment, postContext, reply, confidence, 'error_posteo');
+            queued++;
+          }
+        } else {
+          // ── MANDAR A COLA DE REVISIÓN ───────────────────────────────────────
+          await addToQueue(comment, postContext, reply, confidence, chemRisk ? 'quimica_siempre_manual' : 'baja_confianza');
+          queued++;
+          console.log(`[agent] 👁️ en cola (conf=${confidence.toFixed(2)}): "${comment.text.substring(0, 50)}..."`);
+        }
+
+        processed.add(comment.id);
+
+        // Pequeña pausa para no saturar la API
+        await new Promise(r => setTimeout(r, 500));
       }
     }
-    if (best) {
-      const respuesta = best.respuestas[Math.floor(Math.random() * best.respuestas.length)];
-      res.json({ match: true, faq: best, respuesta });
-    } else {
-      res.json({ match: false });
-    }
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
 
-// Historial de lo que auto-respondió el agente
-app.get('/agent/history', async (req, res) => {
-  try {
-    // unrated=1 solo trae las sin calificar (para el historial de revisión)
-    const unratedOnly = req.query.unrated === '1';
-    const whereClause = unratedOnly 
-      ? "WHERE source = 'ai'" 
-      : "WHERE source IN ('ai','ai_rated_ok','ai_rated_fix')";
-    const result = await pool.query(`
-      SELECT id, comment_text, reply_text, video_title, created_at
-      FROM comment_state
-      ${whereClause}
-      ORDER BY created_at DESC
-      LIMIT 100
-    `);
-    res.json({ history: result.rows });
+    // ── 4. NOTIFICAR POR TELEGRAM ─────────────────────────────────────────────
+    const msg = `🤖 <b>Agente de comentarios - ciclo completado</b>
+
+📥 Comentarios procesados: <b>${fetched}</b>
+✅ Respondidos automáticamente: <b>${autoReplied}</b>
+👁️ En cola para revisión: <b>${queued}</b>
+⏭️ Saltados: <b>${skipped}</b>
+
+${queued > 0 ? `⚠️ Tenés <b>${queued} comentarios</b> esperando tu revisión en el panel.` : '✨ Sin pendientes, todo en orden.'}`;
+
+    await sendTelegram(msg);
+
+    await finishRun(runId, fetched, autoReplied, queued, skipped);
+    console.log(`[agent] ▶ FIN ciclo - auto:${autoReplied} cola:${queued} skip:${skipped}`);
+
+    return { fetched, autoReplied, queued, skipped };
+
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    console.error('[agent] ERROR en ciclo:', e.message);
+    await pool.query(`UPDATE agent_runs SET finished_at=NOW(), error=$2 WHERE id=$1`, [runId, e.message]);
+    await sendTelegram(`❌ <b>Error en agente de comentarios</b>\n${e.message}`);
+    throw e;
   }
-});
+}
 
+// ─── FETCH FB COMMENTS ────────────────────────────────────────────────────────
 
+async function fetchFBComments(answeredIds, discardedIds, queuedIds) {
+  const comments = [];
+  const seenIds = new Set();
+  const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  console.log('[agent/fetchFB] FB_TOKEN presente:', !!FB_TOKEN, '| FB_PAGE_ID:', FB_PAGE_ID || 'VACÍO');
 
-// Agregar ejemplo de comentario a una FAQ para mejorar el matching
-app.post('/agent/faq/:id/add-example', async (req, res) => {
-  const { historyId } = req.body;
   try {
-    // Traer el comentario del historial
-    const row = await pool.query('SELECT comment_text FROM comment_state WHERE id = $1', [historyId]);
-    if (row.rows.length === 0) return res.status(404).json({ error: 'No encontrado' });
-    const commentText = row.rows[0].comment_text;
+    // Posts
+    let pageUrl = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time&limit=10&access_token=${FB_TOKEN}`;
+    let pagesChecked = 0;
+    const MAX_PAGES = 3;
 
-    // Agregar el comentario como ejemplo de match en la FAQ
-    // Guardamos en una tabla de ejemplos de matching
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS faq_examples (
-        id SERIAL PRIMARY KEY,
-        faq_id INT NOT NULL,
-        comment_text TEXT NOT NULL,
-        created_at TIMESTAMPTZ DEFAULT NOW()
-      )
-    `);
-    await pool.query(
-      'INSERT INTO faq_examples (faq_id, comment_text) VALUES ($1, $2)',
-      [req.params.id, commentText]
-    );
+    while (pageUrl && pagesChecked < MAX_PAGES) {
+      const r = await fetch(pageUrl);
+      const data = await r.json();
+      if (!r.ok || !data.data) {
+        console.error('[agent/fetchFB] error FB posts:', JSON.stringify(data).substring(0, 200));
+        break;
+      }
 
-    // Marcar como descartado del historial
-    await pool.query('UPDATE comment_state SET source = $1 WHERE id = $2', ['ai_rated_fix', historyId]);
+      for (const post of data.data) {
+        const cs = await fetchAllPostComments(post.id);
+        for (const c of cs) {
+          if (seenIds.has(c.id)) continue;
+          if (new Date(c.created_time).getTime() < thirtyDaysAgo) continue;
+          if (c.from?.id === FB_PAGE_ID) continue;
+          if (answeredIds.has(c.id) || discardedIds.has(c.id) || queuedIds.has(c.id)) continue;
+          // Skip if page already replied to this comment
+          const replies = c.comments?.data || [];
+          if (replies.some(rep => rep.from?.id === FB_PAGE_ID)) continue;
+          seenIds.add(c.id);
+          comments.push({
+            id: c.id,
+            postId: post.id,
+            postMessage: post.message || '',
+            text: c.message || '',
+            author: c.from?.name || 'Usuario',
+            publishedAt: c.created_time,
+            network: 'fb'
+          });
+        }
+      }
 
-    res.json({ ok: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// Calificar respuesta del historial
-app.post('/agent/history/:id/rate', async (req, res) => {
-  const { id } = req.params;
-  const { rating, correction } = req.body; // rating: 'ok' | 'mejorable' | 'mal'
-  try {
-    const row = await pool.query('SELECT * FROM comment_state WHERE id = $1', [id]);
-    if (row.rows.length === 0) return res.status(404).json({ error: 'No encontrado' });
-    const item = row.rows[0];
-
-    if (rating === 'ok') {
-      // Refuerza el aprendizaje — sube peso del ejemplo
-      await pool.query(`
-        INSERT INTO reply_examples (comment_text, reply_text, post_title, network, source, approved_at)
-        VALUES ($1, $2, $3, 'fb', 'agente', NOW())
-        ON CONFLICT DO NOTHING
-      `, [item.comment_text, item.reply_text, item.video_title || '']);
+      pageUrl = data.paging?.next || null;
+      pagesChecked++;
     }
 
-    if ((rating === 'mejorable' || rating === 'mal') && correction) {
-      // Guarda la corrección de Javi como ejemplo prioritario
-      await pool.query(`
-        INSERT INTO reply_examples (comment_text, reply_text, post_title, network, source, approved_at)
-        VALUES ($1, $2, $3, 'fb', 'agente', NOW())
-      `, [item.comment_text, correction, item.video_title || '']);
-      // Elimina la versión mala del aprendizaje
-      await pool.query(`
-        DELETE FROM reply_examples WHERE comment_text = $1 AND reply_text = $2
-      `, [item.comment_text, item.reply_text]);
+    // Reels
+    const reelsRes = await fetch(`https://graph.facebook.com/v19.0/${FB_PAGE_ID}/video_reels?fields=id,description,created_time&limit=20&access_token=${FB_TOKEN}`);
+    const reelsData = await reelsRes.json();
+    if (reelsRes.ok && reelsData.data) {
+      for (const reel of reelsData.data) {
+        const cs = await fetchAllPostComments(reel.id);
+        for (const c of cs) {
+          if (seenIds.has(c.id)) continue;
+          if (new Date(c.created_time).getTime() < thirtyDaysAgo) continue;
+          if (c.from?.id === FB_PAGE_ID) continue;
+          if (answeredIds.has(c.id) || discardedIds.has(c.id) || queuedIds.has(c.id)) continue;
+          // Skip if page already replied to this comment
+          const reelReplies = c.comments?.data || [];
+          if (reelReplies.some(rep => rep.from?.id === FB_PAGE_ID)) continue;
+          seenIds.add(c.id);
+          comments.push({
+            id: c.id,
+            postId: reel.id,
+            postMessage: reel.description || '',
+            text: c.message || '',
+            author: c.from?.name || 'Usuario',
+            publishedAt: c.created_time,
+            network: 'fb'
+          });
+        }
+      }
     }
-
-    // Marcar como calificado para que desaparezca del historial
-    await pool.query(`UPDATE comment_state SET source = $1 WHERE id = $2`, 
-      [rating === 'ok' ? 'ai_rated_ok' : 'ai_rated_fix', id]);
-
-    res.json({ ok: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// Marcar auto-respuesta como mala — la saca del aprendizaje
-app.post('/agent/history/:id/reject', async (req, res) => {
-  const { id } = req.params;
-  try {
-    // Cambiar source a 'ai_rejected' para excluirla del aprendizaje
-    await pool.query(
-      `UPDATE comment_state SET source = 'ai_rejected' WHERE id = $1`,
-      [id]
-    );
-    // Eliminarla de reply_examples si existe
-    const row = await pool.query('SELECT comment_text, reply_text FROM comment_state WHERE id = $1', [id]);
-    if (row.rows.length > 0) {
-      await pool.query(
-        'DELETE FROM reply_examples WHERE comment_text = $1 AND reply_text = $2',
-        [row.rows[0].comment_text, row.rows[0].reply_text]
-      );
-    }
-    res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    console.error('[agent/fetchFB] error:', e.message);
   }
-});
 
-app.post('/agent/telegram-test', async (req, res) => {
-  try {
-    await agent.sendTelegram('🤖 Conexión con el agente de comentarios OK. Todo funcionando.');
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+  // Más nuevos primero, máximo 30 por ciclo para no saturar
+  comments.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
+  console.log('[agent/fetchFB] total encontrados antes de filtrar: ' + comments.length);
+  return comments.slice(0, 30);
+}
+
+async function fetchAllPostComments(postId) {
+  const url = `https://graph.facebook.com/v19.0/${postId}/comments?fields=id,message,from,created_time,comments{id,from}&limit=50&order=reverse_chronological&access_token=${FB_TOKEN}`;
+  const r = await fetch(url);
+  const data = await r.json();
+  if (!r.ok || !data.data) return [];
+  return data.data;
+}
+
+// ─── COLA DE REVISIÓN ─────────────────────────────────────────────────────────
+
+async function addToQueue(comment, postContext, suggestedReply, confidence, reason) {
+  await pool.query(`
+    INSERT INTO review_queue (id, comment_text, post_id, post_title, author, network, suggested_reply, confidence, reason)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    ON CONFLICT (id) DO NOTHING
+  `, [
+    comment.id,
+    comment.text,
+    comment.postId,
+    postContext?.title || '',
+    comment.author,
+    comment.network || 'fb',
+    suggestedReply,
+    confidence,
+    reason
+  ]);
+}
+
+// ─── APRENDIZAJE: APROBAR RESPUESTA (👍) ──────────────────────────────────────
+
+async function approveReply(commentId, finalReplyText) {
+  // Traer datos de la cola
+  const q = await pool.query(`SELECT * FROM review_queue WHERE id = $1`, [commentId]);
+  if (q.rows.length === 0) return;
+  const item = q.rows[0];
+
+  // Guardar como ejemplo aprobado — esto alimenta al agente para siempre
+  await pool.query(`
+    INSERT INTO reply_examples (comment_text, reply_text, post_id, post_title, network, source)
+    VALUES ($1, $2, $3, $4, $5, 'agente')
+  `, [item.comment_text, finalReplyText, item.post_id, item.post_title, item.network]);
+
+  // Marcar como procesado en la cola
+  await pool.query(`UPDATE review_queue SET status = 'approved' WHERE id = $1`, [commentId]);
+
+  // Marcar como respondido en el sistema principal
+  await saveAsAnswered(commentId, item.comment_text, finalReplyText, item.post_title);
+
+  // Postear en FB
+  await postFBReply(commentId, finalReplyText);
+
+  console.log(`[agent] 👍 aprendido: "${item.comment_text.substring(0, 50)}"`);
+}
+
+// ─── RECHAZAR Y REGENERAR (👎) ────────────────────────────────────────────────
+
+async function rejectAndRegenerate(commentId) {
+  const q = await pool.query(`SELECT * FROM review_queue WHERE id = $1`, [commentId]);
+  if (q.rows.length === 0) return [];
+  const item = q.rows[0];
+
+  const postContext = await pool.query(`SELECT * FROM video_context WHERE post_id = $1`, [item.post_id]);
+  const examples = await getLearnedExamples(item.post_id, item.comment_text);
+
+  // Generar 3 variaciones distintas
+  const variations = [];
+  for (let i = 0; i < 3; i++) {
+    const v = await generateReply(item.comment_text, postContext.rows[0], examples);
+    if (v && !variations.includes(v)) variations.push(v);
+    await new Promise(r => setTimeout(r, 300));
   }
-});
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// CRON INTERNO — cada 2 horas corre el agente automáticamente
-// ═══════════════════════════════════════════════════════════════════════════════
+  return variations;
+}
 
-function startCron() {
-  const TWO_HOURS = 2 * 60 * 60 * 1000;
+// ─── FINISH RUN ───────────────────────────────────────────────────────────────
 
-  const runCycle = async () => {
-    try {
-      console.log('[cron] ▶ ciclo automático iniciado');
-      await agent.runAgent('fb');
-    } catch (e) {
-      console.error('[cron] error en ciclo:', e.message);
-    }
+async function finishRun(runId, fetched, autoReplied, queued, skipped) {
+  await pool.query(`
+    UPDATE agent_runs SET 
+      finished_at=NOW(), 
+      comments_fetched=$2, 
+      comments_auto_replied=$3, 
+      comments_queued=$4,
+      comments_skipped=$5
+    WHERE id=$1
+  `, [runId, fetched, autoReplied, queued, skipped]);
+}
+
+// ─── ESTADÍSTICAS ─────────────────────────────────────────────────────────────
+
+async function getAgentStats() {
+  const runs = await pool.query(`
+    SELECT * FROM agent_runs ORDER BY started_at DESC LIMIT 10
+  `);
+  const examples = await pool.query(`SELECT COUNT(*) as cnt FROM reply_examples`);
+  const pending = await pool.query(`SELECT COUNT(*) as cnt FROM review_queue WHERE status = 'pending'`);
+  const totalAutoReplied = await pool.query(`
+    SELECT COALESCE(SUM(comments_auto_replied), 0) as total FROM agent_runs
+  `);
+
+  return {
+    recent_runs: runs.rows,
+    total_learned_examples: parseInt(examples.rows[0].cnt),
+    pending_review: parseInt(pending.rows[0].cnt),
+    total_auto_replied: parseInt(totalAutoReplied.rows[0].total)
   };
-
-  // Primera corrida 2 minutos después de iniciar (no en el arranque para evitar problemas)
-  setTimeout(() => {
-    runCycle();
-    setInterval(runCycle, TWO_HOURS);
-  }, 2 * 60 * 1000);
-
-  console.log('[cron] programado — primer ciclo en 2 minutos, luego cada 2 horas');
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// STARTUP
-// ═══════════════════════════════════════════════════════════════════════════════
-
-const PORT = process.env.PORT || 3000;
-if (require.main === module) {
-  Promise.all([initDB(), agent.initAgentDB(), initFAQ()])
-    .then(() => {
-      app.listen(PORT, () => {
-        console.log(`Servidor corriendo en puerto ${PORT}`);
-        startCron();
-      });
-    })
-    .catch(e => {
-      console.error('Error iniciando DB:', e.message);
-      app.listen(PORT, () => {
-        console.log(`Servidor corriendo sin DB en puerto ${PORT}`);
-        startCron();
-      });
-    });
-}
-
-module.exports = { app, initDB, getState, markAnswered, markDiscarded, getExamples };
+module.exports = {
+  initAgentDB,
+  runAgent,
+  approveReply,
+  rejectAndRegenerate,
+  getAgentStats,
+  addToQueue,
+  sendTelegram
+};
