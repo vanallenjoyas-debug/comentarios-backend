@@ -954,6 +954,130 @@ app.post('/agent/migrate-history', async (req, res) => {
   }
 });
 
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FAQ — preguntas frecuentes con respuestas canónicas y variaciones
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Inicializar tabla FAQ
+async function initFAQ() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS faq (
+      id SERIAL PRIMARY KEY,
+      pregunta TEXT NOT NULL,
+      keywords TEXT NOT NULL,
+      respuestas TEXT[] NOT NULL,
+      activa BOOLEAN DEFAULT true,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+}
+
+// Traer todas las FAQs activas
+app.get('/agent/faq', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM faq WHERE activa = true ORDER BY created_at DESC');
+    res.json({ faqs: result.rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Crear nueva FAQ
+app.post('/agent/faq', async (req, res) => {
+  const { pregunta, keywords, respuestas } = req.body;
+  if (!pregunta || !respuestas || respuestas.length === 0) return res.status(400).json({ error: 'Faltan datos' });
+  try {
+    const result = await pool.query(
+      'INSERT INTO faq (pregunta, keywords, respuestas) VALUES ($1, $2, $3) RETURNING *',
+      [pregunta, keywords || pregunta, respuestas]
+    );
+    res.json({ ok: true, faq: result.rows[0] });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Editar FAQ
+app.put('/agent/faq/:id', async (req, res) => {
+  const { pregunta, keywords, respuestas } = req.body;
+  try {
+    await pool.query(
+      'UPDATE faq SET pregunta=$1, keywords=$2, respuestas=$3 WHERE id=$4',
+      [pregunta, keywords || pregunta, respuestas, req.params.id]
+    );
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Eliminar FAQ
+app.delete('/agent/faq/:id', async (req, res) => {
+  try {
+    await pool.query('UPDATE faq SET activa = false WHERE id = $1', [req.params.id]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Buscar FAQ que matchee un comentario
+app.post('/agent/faq/match', async (req, res) => {
+  const { comment } = req.body;
+  if (!comment) return res.status(400).json({ match: null });
+  try {
+    const faqs = await pool.query('SELECT * FROM faq WHERE activa = true');
+    const text = comment.toLowerCase();
+    let best = null;
+    for (const faq of faqs.rows) {
+      const keys = faq.keywords.toLowerCase().split(',').map(k => k.trim()).filter(Boolean);
+      const matches = keys.filter(k => text.includes(k));
+      if (matches.length > 0 && (!best || matches.length > best.matchCount)) {
+        best = { ...faq, matchCount: matches.length };
+      }
+    }
+    if (best) {
+      const respuesta = best.respuestas[Math.floor(Math.random() * best.respuestas.length)];
+      res.json({ match: true, faq: best, respuesta });
+    } else {
+      res.json({ match: false });
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Historial de lo que auto-respondió el agente
+app.get('/agent/history', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT id, comment_text, reply_text, video_title, created_at
+      FROM comment_state
+      WHERE source = 'ai'
+      ORDER BY created_at DESC
+      LIMIT 50
+    `);
+    res.json({ history: result.rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Marcar auto-respuesta como mala — la saca del aprendizaje
+app.post('/agent/history/:id/reject', async (req, res) => {
+  const { id } = req.params;
+  try {
+    // Cambiar source a 'ai_rejected' para excluirla del aprendizaje
+    await pool.query(
+      `UPDATE comment_state SET source = 'ai_rejected' WHERE id = $1`,
+      [id]
+    );
+    // Eliminarla de reply_examples si existe
+    const row = await pool.query('SELECT comment_text, reply_text FROM comment_state WHERE id = $1', [id]);
+    if (row.rows.length > 0) {
+      await pool.query(
+        'DELETE FROM reply_examples WHERE comment_text = $1 AND reply_text = $2',
+        [row.rows[0].comment_text, row.rows[0].reply_text]
+      );
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/agent/telegram-test', async (req, res) => {
   try {
     await agent.sendTelegram('🤖 Conexión con el agente de comentarios OK. Todo funcionando.');
@@ -994,7 +1118,7 @@ function startCron() {
 
 const PORT = process.env.PORT || 3000;
 if (require.main === module) {
-  Promise.all([initDB(), agent.initAgentDB()])
+  Promise.all([initDB(), agent.initAgentDB(), initFAQ()])
     .then(() => {
       app.listen(PORT, () => {
         console.log(`Servidor corriendo en puerto ${PORT}`);
