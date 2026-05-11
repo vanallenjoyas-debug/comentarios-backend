@@ -920,6 +920,40 @@ app.get('/agent/runs', async (req, res) => {
 });
 
 // Test de conexión Telegram
+// Migración única — copia comment_state → reply_examples con source='historico'
+app.post('/agent/migrate-history', async (req, res) => {
+  try {
+    const source = await pool.query(`
+      SELECT id, comment_text, reply_text, video_title, categoria
+      FROM comment_state
+      WHERE status = 'answered'
+        AND comment_text IS NOT NULL AND comment_text != ''
+        AND reply_text IS NOT NULL AND reply_text != ''
+        AND LENGTH(comment_text) > 2
+        AND LENGTH(reply_text) > 2
+    `);
+    let inserted = 0, skipped = 0;
+    for (const row of source.rows) {
+      const exists = await pool.query(
+        `SELECT id FROM reply_examples WHERE comment_text = $1 AND reply_text = $2 LIMIT 1`,
+        [row.comment_text, row.reply_text]
+      );
+      if (exists.rows.length > 0) { skipped++; continue; }
+      await pool.query(`
+        INSERT INTO reply_examples (comment_text, reply_text, post_title, categoria, network, source, approved_at)
+        VALUES ($1, $2, $3, $4, 'yt', 'historico', NOW())
+      `, [row.comment_text, row.reply_text, row.video_title || '', row.categoria || 'otro']);
+      inserted++;
+    }
+    const total = await pool.query(`SELECT COUNT(*) as cnt FROM reply_examples`);
+    console.log(`[migrate] done — inserted: ${inserted}, skipped: ${skipped}, total: ${total.rows[0].cnt}`);
+    res.json({ ok: true, inserted, skipped, total: parseInt(total.rows[0].cnt) });
+  } catch (e) {
+    console.error('[migrate] error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/agent/telegram-test', async (req, res) => {
   try {
     await agent.sendTelegram('🤖 Conexión con el agente de comentarios OK. Todo funcionando.');
