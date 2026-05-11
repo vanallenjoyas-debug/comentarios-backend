@@ -318,45 +318,57 @@ Comentario: ${comment}`;
 // ─── CALCULAR CONFIANZA ───────────────────────────────────────────────────────
 
 async function calculateConfidence(comment, postId) {
-  // Confianza alta si:
-  // 1. Tenemos ejemplos previos del mismo post
-  // 2. Es una categoría conocida (elogio, yeti, sudaca, etc)
-  // 3. El comentario no es una pregunta técnica compleja
+  const text = comment.toLowerCase();
 
+  // REGLAS DURAS — confianza fija, no necesitan cálculo
+
+  // Solo emojis
+  const soloEmojis = comment.trim().replace(/[🀀-🿿☀-⟿︀-﻿🤀-🧿🨀-🫿 -  -⁯✀-➿ ]/gu, '');
+  if (soloEmojis.length === 0 && comment.trim().length > 0) {
+    console.log('[agent] confianza: 0.95 (solo emojis)');
+    return 0.95;
+  }
+
+  // Elogios claros
+  const esElogio = [
+    /yeti|h.brido/i,
+    /sudaca/i,
+    /genial|excelente|incre.ble|buen.simo|espectacular|crack|capo|groso|grosso/i,
+    /muy buen|buen video|buen contenido|gran video|gran trabajo/i,
+    /me encanta|me gust/i,
+    /sos el mejor|sos un genio|sos un capo|sos un crack/i,
+    /qué bueno|que bueno|qué lindo|que lindo/i,
+    /de donde sos|de d.nde sos|argentina/i,
+    /suscrib/i,
+    /felicit|bravo|brillante|top/i
+  ].some(p => p.test(text));
+
+  if (esElogio && comment.length < 150) {
+    console.log('[agent] confianza: 0.90 (elogio detectado)');
+    return 0.90;
+  }
+
+  // Emojis positivos con texto corto
+  if (/[🔥💪👏❤😍🙌👍⭐🏆]/.test(comment) && comment.length < 60) {
+    console.log('[agent] confianza: 0.82 (emoji positivo corto)');
+    return 0.82;
+  }
+
+  // CÁLCULO NORMAL para el resto
   const postExamples = await pool.query(
-    `SELECT COUNT(*) as cnt FROM reply_examples WHERE post_id = $1`, [postId]
+    'SELECT COUNT(*) as cnt FROM reply_examples WHERE post_id = $1', [postId]
   );
   const postExampleCount = parseInt(postExamples.rows[0].cnt);
-
-  const totalExamples = await pool.query(`SELECT COUNT(*) as cnt FROM reply_examples`);
+  const totalExamples = await pool.query('SELECT COUNT(*) as cnt FROM reply_examples');
   const total = parseInt(totalExamples.rows[0].cnt);
 
-  // Base: arranca en 0.4 si hay más de 10 ejemplos aprendidos (ya tiene criterio)
-  let confidence = total >= 10 ? 0.45 : Math.min(0.35, total / 30);
-
-  // Bonus: ejemplos específicos de este post
+  let confidence = total >= 100 ? 0.50 : total >= 10 ? 0.40 : 0.25;
   if (postExampleCount > 0) confidence += 0.15;
-  if (postExampleCount > 5) confidence += 0.1;
-
-  // Bonus fuerte: patrones simples que SIEMPRE tienen buena respuesta
-  const simplePatterns = [
-    /yeti|híbrido|hibrido/i,
-    /joyería sudaca|sudaca/i,
-    /genial|excelente|increíble|buenísimo|espectacular|crack|maestro/i,
-    /de donde sos|argentina|latino|sudaca/i,
-    /gracias|thank|danke|merci/i,
-    /🔥|💪|👏|❤️|😍|🙌/
-  ];
-  if (simplePatterns.some(p => p.test(comment))) confidence += 0.3;
-
-  // Solo emojis → siempre auto-responder
-  if (/^[\s\p{Emoji}]+$/u.test(comment)) confidence = 0.95;
-
-  // Penalización: preguntas técnicas o comentarios largos
+  if (postExampleCount > 5) confidence += 0.10;
   if (comment.length > 200) confidence -= 0.15;
-  if ((comment.match(/\?/g) || []).length >= 2) confidence -= 0.2;
+  if ((comment.match(/\?/g) || []).length >= 2) confidence -= 0.20;
 
-  console.log(`[agent] confianza: ${confidence.toFixed(2)} | ejemplos total: ${total} | post: ${postExampleCount}`);
+  console.log('[agent] confianza: ' + confidence.toFixed(2) + ' | total: ' + total + ' | post: ' + postExampleCount);
   return Math.max(0.1, Math.min(0.95, confidence));
 }
 
