@@ -633,6 +633,7 @@ async function fetchFBComments(answeredIds, discardedIds, queuedIds) {
   const comments = [];
   const seenIds = new Set();
   const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  console.log('[agent/fetchFB] FB_TOKEN presente:', !!FB_TOKEN, '| FB_PAGE_ID:', FB_PAGE_ID || 'VACÍO');
 
   try {
     // Posts
@@ -643,7 +644,10 @@ async function fetchFBComments(answeredIds, discardedIds, queuedIds) {
     while (pageUrl && pagesChecked < MAX_PAGES) {
       const r = await fetch(pageUrl);
       const data = await r.json();
-      if (!r.ok || !data.data) break;
+      if (!r.ok || !data.data) {
+        console.error('[agent/fetchFB] error FB posts:', JSON.stringify(data).substring(0, 200));
+        break;
+      }
 
       for (const post of data.data) {
         const cs = await fetchAllPostComments(post.id);
