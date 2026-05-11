@@ -1061,6 +1061,38 @@ app.get('/agent/history', async (req, res) => {
 });
 
 
+
+// Agregar ejemplo de comentario a una FAQ para mejorar el matching
+app.post('/agent/faq/:id/add-example', async (req, res) => {
+  const { historyId } = req.body;
+  try {
+    // Traer el comentario del historial
+    const row = await pool.query('SELECT comment_text FROM comment_state WHERE id = $1', [historyId]);
+    if (row.rows.length === 0) return res.status(404).json({ error: 'No encontrado' });
+    const commentText = row.rows[0].comment_text;
+
+    // Agregar el comentario como ejemplo de match en la FAQ
+    // Guardamos en una tabla de ejemplos de matching
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS faq_examples (
+        id SERIAL PRIMARY KEY,
+        faq_id INT NOT NULL,
+        comment_text TEXT NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await pool.query(
+      'INSERT INTO faq_examples (faq_id, comment_text) VALUES ($1, $2)',
+      [req.params.id, commentText]
+    );
+
+    // Marcar como descartado del historial
+    await pool.query('UPDATE comment_state SET source = $1 WHERE id = $2', ['ai_rated_fix', historyId]);
+
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Calificar respuesta del historial
 app.post('/agent/history/:id/rate', async (req, res) => {
   const { id } = req.params;
