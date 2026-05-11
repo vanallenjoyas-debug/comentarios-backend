@@ -680,6 +680,9 @@ async function fetchFBComments(answeredIds, discardedIds, queuedIds) {
           if (new Date(c.created_time).getTime() < thirtyDaysAgo) continue;
           if (c.from?.id === FB_PAGE_ID) continue;
           if (answeredIds.has(c.id) || discardedIds.has(c.id) || queuedIds.has(c.id)) continue;
+          // Skip if page already replied to this comment
+          const replies = c.comments?.data || [];
+          if (replies.some(rep => rep.from?.id === FB_PAGE_ID)) continue;
           seenIds.add(c.id);
           comments.push({
             id: c.id,
@@ -708,6 +711,9 @@ async function fetchFBComments(answeredIds, discardedIds, queuedIds) {
           if (new Date(c.created_time).getTime() < thirtyDaysAgo) continue;
           if (c.from?.id === FB_PAGE_ID) continue;
           if (answeredIds.has(c.id) || discardedIds.has(c.id) || queuedIds.has(c.id)) continue;
+          // Skip if page already replied to this comment
+          const reelReplies = c.comments?.data || [];
+          if (reelReplies.some(rep => rep.from?.id === FB_PAGE_ID)) continue;
           seenIds.add(c.id);
           comments.push({
             id: c.id,
