@@ -737,8 +737,12 @@ async function approveReply(commentId, finalReplyText) {
   // Marcar como procesado en la cola
   await pool.query(`UPDATE review_queue SET status = 'approved' WHERE id = $1`, [commentId]);
 
-  // Marcar como respondido en el sistema principal
-  await saveAsAnswered(commentId, item.comment_text, finalReplyText, item.post_title);
+  // Marcar como respondido — source='javi' para que NO aparezca en historial IA
+  await pool.query(`
+    INSERT INTO comment_state (id, status, comment_text, reply_text, video_title, source)
+    VALUES ($1, 'answered', $2, $3, $4, 'javi')
+    ON CONFLICT (id) DO UPDATE SET status='answered', reply_text=$3, video_title=$4, source='javi'
+  `, [commentId, item.comment_text, finalReplyText, item.post_title || '']);
 
   console.log(`[agent] 👍 aprendido: "${item.comment_text.substring(0, 50)}"`);
 }
