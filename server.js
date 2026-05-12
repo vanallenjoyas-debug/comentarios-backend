@@ -495,7 +495,7 @@ app.get('/fb/comments', async (req, res) => {
     }
 
     // Agregar comentarios de reels
-    const reelsResFB = await fetch(`https://graph.facebook.com/v19.0/${FB_PAGE_ID}/video_reels?fields=id,description,created_time&limit=50&access_token=${FB_TOKEN}`);
+    const reelsResFB = await fetch(`https://graph.facebook.com/v19.0/${FB_PAGE_ID}/video_reels?fields=id,description,title,name,created_time&limit=50&access_token=${FB_TOKEN}`);
     const reelsDataFB = await reelsResFB.json();
     if (reelsResFB.ok && reelsDataFB.data) {
       const allReelComments = await Promise.all(reelsDataFB.data.map(reel => fetchAllPostComments(reel.id, FB_TOKEN).then(cs => ({ reel, cs }))));
@@ -512,7 +512,7 @@ app.get('/fb/comments', async (req, res) => {
           comments.push({
             id: c.id,
             postId: reel.id,
-            postMessage: reel.description || '',
+            postMessage: reel.title || reel.name || reel.description || 'Reel sin título',
             text: c.message,
             author: c.from?.name || 'Usuario',
             authorPhoto: `https://graph.facebook.com/${c.from?.id}/picture?type=square`,
@@ -568,7 +568,7 @@ app.get('/fb/comments/old', async (req, res) => {
       pagesChecked++;
     }
 
-    const reelsRes = await fetch(`https://graph.facebook.com/v19.0/${FB_PAGE_ID}/video_reels?fields=id,description,created_time&limit=50&access_token=${FB_TOKEN}`);
+    const reelsRes = await fetch(`https://graph.facebook.com/v19.0/${FB_PAGE_ID}/video_reels?fields=id,description,title,name,created_time&limit=50&access_token=${FB_TOKEN}`);
     const reelsData = await reelsRes.json();
     if (reelsRes.ok && reelsData.data) {
       const allReelComments = await Promise.all(reelsData.data.map(reel => fetchAllPostComments(reel.id, FB_TOKEN).then(cs => ({ reel, cs }))));
@@ -581,7 +581,7 @@ app.get('/fb/comments/old', async (req, res) => {
           if (replies.some(r => r.from?.id === FB_PAGE_ID)) continue;
           if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
           seenIds.add(c.id);
-          comments.push({ id: c.id, postId: reel.id, postMessage: reel.description || '', text: c.message, author: c.from?.name || 'Usuario', authorPhoto: `https://graph.facebook.com/${c.from?.id}/picture?type=square`, publishedAt: c.created_time, network: 'fb' });
+          comments.push({ id: c.id, postId: reel.id, postMessage: reel.title || reel.name || reel.description || 'Reel sin título', text: c.message, author: c.from?.name || 'Usuario', authorPhoto: `https://graph.facebook.com/${c.from?.id}/picture?type=square`, publishedAt: c.created_time, network: 'fb' });
         }
       }
     }
