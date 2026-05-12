@@ -204,21 +204,6 @@ async function getLearnedExamples(postId, comentario, limit = 15) {
   }).slice(0, limit);
 }
 
-// ─── SELECCIÓN DE MODELO ──────────────────────────────────────────────────────
-// Haiku para el 90% (barato) — Sonnet solo para casos técnicos o complejos
-
-function selectModel(comment, postContext) {
-  const text = comment.toLowerCase();
-  const needsSonnet =
-    comment.length > 150 ||
-    (text.split('?').length - 1) >= 2 ||
-    /como|por que|cuanto|temperatura|acido|acido|proceso|refinad|pureza|aleacion|quilate|karat|formula|electro|voltaje|densidad|fundicion/.test(text) ||
-    (postContext && postContext.content_type === 'proceso_quimico' && text.includes('?'));
-  const model = needsSonnet ? 'claude-sonnet-4-20250514' : 'claude-haiku-4-5';
-  console.log('[agent] modelo:', model, '| chars:', comment.length);
-  return model;
-}
-
 
 // ─── BUSCAR FAQ MATCH ─────────────────────────────────────────────────────────
 
@@ -754,13 +739,10 @@ async function rejectAndRegenerate(commentId) {
   if (q.rows.length === 0) return [];
   const item = q.rows[0];
 
-  const postContext = await pool.query(`SELECT * FROM video_context WHERE post_id = $1`, [item.post_id]);
-  const examples = await getLearnedExamples(item.post_id, item.comment_text);
-
   // Generar 3 variaciones distintas
   const variations = [];
   for (let i = 0; i < 3; i++) {
-    const v = await generateReply(item.comment_text, postContext.rows[0], examples);
+    const v = await generateReply(item.comment_text, null, null);
     if (v && !variations.includes(v)) variations.push(v);
     await new Promise(r => setTimeout(r, 300));
   }
