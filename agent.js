@@ -294,7 +294,7 @@ Si corresponde a alguna FAQ, respondé SOLO el número (ej: "1" o "2"). Si no co
 
 async function generateReply(comment, postContext, examples) {
   try {
-    const BACKEND_URL = `http://localhost:${process.env.PORT || 8080}`;
+    const BACKEND_URL = `http://localhost:${process.env.PORT || 3000}`;
     const r = await fetch(`${BACKEND_URL}/suggest-reply`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -535,9 +535,6 @@ async function runAgent(network = 'fb') {
           continue;
         }
 
-        // Buscar ejemplos aprendidos
-        const examples = await getLearnedExamples(postId, comment.text);
-
         // Filtro de seguridad química — va siempre a cola, nunca auto-responde
         const chemRisk = isChemicalRisk(comment.text);
         if (chemRisk) {
@@ -582,7 +579,7 @@ async function runAgent(network = 'fb') {
         const confidence = chemRisk ? 0 : await calculateConfidence(comment.text, postId);
 
         // Generar respuesta
-        const reply = await generateReply(comment.text, postContext, examples);
+        const reply = await generateReply(comment.text, null, null);
 
         if (!reply) {
           // Fallback: respuesta genérica para comentarios que el modelo no supo procesar
@@ -651,7 +648,7 @@ async function fetchFBComments(answeredIds, discardedIds, queuedIds) {
   console.log('[agent/fetchFB] usando endpoint interno /fb/comments');
   try {
     // Usar el mismo endpoint que ya funciona en la app — rápido y confiable
-    const BACKEND_URL = `http://localhost:${process.env.PORT || 8080}`;
+    const BACKEND_URL = `http://localhost:${process.env.PORT || 3000}`;
     const r = await fetch(`${BACKEND_URL}/fb/comments`);
     if (!r.ok) {
       console.error('[agent/fetchFB] error endpoint:', r.status);
@@ -728,7 +725,10 @@ async function approveReply(commentId, finalReplyText) {
   if (q.rows.length === 0) return;
   const item = q.rows[0];
 
-  // Guardar como ejemplo aprobado — esto alimenta al agente para siempre
+  // Postear en FB primero — si falla, no guardamos nada
+  await postFBReply(commentId, finalReplyText);
+
+  // Guardar como ejemplo aprobado
   await pool.query(`
     INSERT INTO reply_examples (comment_text, reply_text, post_id, post_title, network, source)
     VALUES ($1, $2, $3, $4, $5, 'agente')
@@ -739,9 +739,6 @@ async function approveReply(commentId, finalReplyText) {
 
   // Marcar como respondido en el sistema principal
   await saveAsAnswered(commentId, item.comment_text, finalReplyText, item.post_title);
-
-  // Postear en FB
-  await postFBReply(commentId, finalReplyText);
 
   console.log(`[agent] 👍 aprendido: "${item.comment_text.substring(0, 50)}"`);
 }
