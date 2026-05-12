@@ -746,90 +746,42 @@ ${queued > 0 ? `⚠️ Tenés <b>${queued} comentarios</b> esperando tu revisió
 // ─── FETCH FB COMMENTS ────────────────────────────────────────────────────────
 
 async function fetchFBComments(answeredIds, discardedIds, queuedIds) {
-  const comments = [];
-  const seenIds = new Set();
-  const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
-  console.log('[agent/fetchFB] FB_TOKEN presente:', !!FB_TOKEN, '| FB_PAGE_ID:', FB_PAGE_ID || 'VACÍO');
-
+  console.log('[agent/fetchFB] usando endpoint interno /fb/comments');
   try {
-    // Posts
-    let pageUrl = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time&limit=20&access_token=${FB_TOKEN}`;
-    let pagesChecked = 0;
-    const MAX_PAGES = 5;
-
-    while (pageUrl && pagesChecked < MAX_PAGES) {
-      const r = await fetch(pageUrl);
-      const data = await r.json();
-      if (!r.ok || !data.data) {
-        console.error('[agent/fetchFB] error FB posts:', JSON.stringify(data).substring(0, 200));
-        break;
-      }
-
-      for (const post of data.data) {
-        const cs = await fetchAllPostComments(post.id);
-        for (const c of cs) {
-          if (seenIds.has(c.id)) continue;
-          if (new Date(c.created_time).getTime() < thirtyDaysAgo) continue;
-          if (c.from?.id === FB_PAGE_ID) continue;
-          if (answeredIds.has(c.id) || discardedIds.has(c.id) || queuedIds.has(c.id)) continue;
-          // Skip if page already replied to this comment
-          const replies = c.comments?.data || [];
-          if (replies.some(rep => rep.from?.id === FB_PAGE_ID)) continue;
-          seenIds.add(c.id);
-          comments.push({
-            id: c.id,
-            postId: post.id,
-            postMessage: post.message || '',
-            postUrl: `https://www.facebook.com/${FB_PAGE_ID}/posts/${post.id.split('_')[1] || post.id}`,
-            text: c.message || '',
-            author: c.from?.name || 'Usuario',
-            publishedAt: c.created_time,
-            network: 'fb'
-          });
-        }
-      }
-
-      pageUrl = data.paging?.next || null;
-      pagesChecked++;
+    // Usar el mismo endpoint que ya funciona en la app — rápido y confiable
+    const BACKEND_URL = `http://localhost:${process.env.PORT || 8080}`;
+    const r = await fetch(`${BACKEND_URL}/fb/comments`);
+    if (!r.ok) {
+      console.error('[agent/fetchFB] error endpoint:', r.status);
+      return [];
     }
+    const data = await r.json();
+    const allComments = data.comments || [];
+    
+    // Filtrar los que ya procesamos
+    const filtered = allComments.filter(c => 
+      !answeredIds.has(c.id) && 
+      !discardedIds.has(c.id) && 
+      !queuedIds.has(c.id)
+    ).map(c => ({
+      id: c.id,
+      postId: c.postId || c.id,
+      postMessage: c.postMessage || '',
+      postUrl: c.postUrl || '',
+      text: c.text || c.message || '',
+      author: c.author || c.authorName || 'Usuario',
+      publishedAt: c.publishedAt || c.created_time,
+      network: 'fb'
+    }));
 
-    // Reels
-    const reelsRes = await fetch(`https://graph.facebook.com/v19.0/${FB_PAGE_ID}/video_reels?fields=id,description,created_time&limit=50&access_token=${FB_TOKEN}`);
-    const reelsData = await reelsRes.json();
-    if (reelsRes.ok && reelsData.data) {
-      for (const reel of reelsData.data) {
-        const cs = await fetchAllPostComments(reel.id);
-        for (const c of cs) {
-          if (seenIds.has(c.id)) continue;
-          if (new Date(c.created_time).getTime() < thirtyDaysAgo) continue;
-          if (c.from?.id === FB_PAGE_ID) continue;
-          if (answeredIds.has(c.id) || discardedIds.has(c.id) || queuedIds.has(c.id)) continue;
-          // Skip if page already replied to this comment
-          const reelReplies = c.comments?.data || [];
-          if (reelReplies.some(rep => rep.from?.id === FB_PAGE_ID)) continue;
-          seenIds.add(c.id);
-          comments.push({
-            id: c.id,
-            postId: reel.id,
-            postMessage: reel.description || '',
-            postUrl: `https://www.facebook.com/reel/${reel.id.split('_')[1] || reel.id}`,
-            text: c.message || '',
-            author: c.from?.name || 'Usuario',
-            publishedAt: c.created_time,
-            network: 'fb'
-          });
-        }
-      }
-    }
-  } catch (e) {
+    console.log('[agent/fetchFB] total sin filtrar:', allComments.length, '| nuevos:', filtered.length);
+    return filtered.slice(0, 50);
+  } catch(e) {
     console.error('[agent/fetchFB] error:', e.message);
+    return [];
   }
-
-  // Más nuevos primero, máximo 30 por ciclo para no saturar
-  comments.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
-  console.log('[agent/fetchFB] total encontrados antes de filtrar: ' + comments.length);
-  return comments.slice(0, 50);
 }
+
 
 async function fetchAllPostComments(postId) {
   // Traer comentarios sin respuesta — filter=stream trae todos, luego filtramos los que no tienen reply de la página
