@@ -125,7 +125,7 @@ async function getExamples(limit = 20, categoria = null) {
   return res.rows;
 }
 
-const CATEGORIAS_VALIDAS = ['elogio','yeti_hibrido','sudaca','proceso','aprender','narracion','compra','curso','gracioso','otro'];
+const CATEGORIAS_VALIDAS = ['elogio','yeti_hibrido','sudaca','proceso','aprender','narracion','compra','curso','gracioso','contaminacion','otro'];
 
 async function clasificarComentario(text) {
   const apiKey = (process.env.ANTHROPIC_API_KEY || '').trim();
@@ -136,10 +136,10 @@ async function clasificarComentario(text) {
       body: JSON.stringify({
         model: 'claude-haiku-4-5',
         max_tokens: 10,
-        messages: [{ role: 'user', content: `Clasificá este comentario de YouTube en UNA categoría. Respondé SOLO la palabra clave.
+        messages: [{ role: 'user', content: `Clasificá este comentario de un canal de joyería argentina en UNA categoría. Respondé SOLO la palabra clave.
 
 Categorías:
-- elogio (felicitaciones, le gusta el video, apoyo)
+- elogio (felicitaciones, le gusta el video, apoyo, buen trabajo)
 - yeti_hibrido (lo llaman yeti, híbrido, parecido a alguien)
 - sudaca (orgullo sudaca, joyería sudaca)
 - proceso (preguntas sobre proceso técnico o químico)
@@ -147,8 +147,11 @@ Categorías:
 - narracion (elogian cómo habla o explica)
 - compra (quieren comprar, preguntan envío o precio)
 - curso (preguntan por cursos o clases)
-- gracioso (humor, chiste)
+- contaminacion (preguntan o critican sobre contaminación, residuos, medio ambiente, daño ecológico, tirar químicos)
+- gracioso (humor, chiste claro, comentario gracioso sin crítica)
 - otro
+
+IMPORTANTE: si el comentario mezcla humor con crítica ambiental o residuos, clasificar como "contaminacion" no "gracioso".
 
 Comentario: "${text.substring(0, 200)}"` }]
       })
@@ -798,6 +801,7 @@ REGLAS:
 - La marca es "Sudaca" con C, nunca con K
 - Si el comentario es solo emojis → responder solo con emojis
 - Comentario gracioso → reírse y nada más, nunca explicar el chiste
+- Preguntan sobre contaminación, residuos o medio ambiente → elegí AL AZAR: "el proceso no contamina, los residuos se neutralizan y se almacenan para entregarlos a una empresa que se encarga de su neutralización final 💪" / "jamás tiramos nada al desagüe, todo se neutraliza y va a disposición final con empresa especializada 🙌" / "los residuos se neutralizan y se entregan a empresa de disposición final, el proceso está pensado para no contaminar 👋"
 - "Es rentable?" → "Si tiene plata pero no es muy rentable de extraer"
 - "Por qué no fundís directo?" → "Si solo fundimos no podemos garantizar la pureza del metal"
 - Pepetools → "Está en mi bio, cupón vanallen 10% de descuento"
