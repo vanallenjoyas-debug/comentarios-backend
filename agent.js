@@ -642,7 +642,7 @@ async function runAgent(network = 'fb') {
           const wasteReply = WASTE_RESPONSES[Math.floor(Math.random() * WASTE_RESPONSES.length)];
           try {
             await postFBReply(comment.id, wasteReply);
-            await saveAsAnswered(comment.id, comment.text, wasteReply, postContext.title, comment.postUrl);
+            await saveAsAnswered(comment.id, comment.text, wasteReply, comment.postMessage || postContext.title || '', comment.postUrl);
             autoReplied++;
             console.log('[agent] ✅ residuos (respuesta fija): "' + comment.text.substring(0, 50) + '"');
           } catch(e) {
@@ -659,7 +659,7 @@ async function runAgent(network = 'fb') {
         if (faqReply && !chemRisk) {
           try {
             await postFBReply(comment.id, faqReply);
-            await saveAsAnswered(comment.id, comment.text, faqReply, postContext.title, comment.postUrl);
+            await saveAsAnswered(comment.id, comment.text, faqReply, comment.postMessage || postContext.title || '', comment.postUrl);
             autoReplied++;
             console.log('[agent] ✅ FAQ auto-respondido: "' + comment.text.substring(0, 50) + '"');
           } catch(e) {
@@ -690,7 +690,7 @@ async function runAgent(network = 'fb') {
           // ── AUTO-RESPONDER ──────────────────────────────────────────────────
           try {
             await postFBReply(comment.id, reply);
-            await saveAsAnswered(comment.id, comment.text, reply, postContext.title, comment.postUrl);
+            await saveAsAnswered(comment.id, comment.text, reply, comment.postMessage || postContext.title || '', comment.postUrl);
             autoReplied++;
             console.log(`[agent] ✅ auto-respondido: "${comment.text.substring(0, 50)}..."`);
           } catch (e) {
@@ -803,7 +803,7 @@ async function addToQueue(comment, postContext, suggestedReply, confidence, reas
     comment.id,
     comment.text,
     comment.postId,
-    postContext?.title || '',
+    comment.postMessage || postContext?.title || '',
     comment.author,
     comment.network || 'fb',
     suggestedReply,
