@@ -302,12 +302,7 @@ async function generateReply(comment, postContext, examples) {
     });
   }
 
-  // Contexto del post si existe
-  const contextBlock = postContext && postContext.title
-    ? '\n[Contexto del post: ' + postContext.title + ' — ' + (postContext.typical_comments || '') + ']'
-    : '';
-
-  const prompt = 'Sos Javi (Javier Romero), joyero argentino del canal Joyeria Sudaca. Tu tono es casual, directo, rioplatense natural — sin exagerar el acento, sin sonar a robot.' + contextBlock + ejemplosBloque + `
+  const prompt = 'Sos Javi (Javier Romero), joyero argentino del canal Joyeria Sudaca. Tu tono es casual, directo, rioplatense natural — sin exagerar el acento, sin sonar a robot.' + ejemplosBloque + `
 
 CATEGORÍAS Y VARIACIONES — elegí UNA al azar de la categoría que corresponda:
 
