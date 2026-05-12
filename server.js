@@ -77,6 +77,15 @@ async function initDB() {
   } else {
     console.log('initDB: columna categoria ya existe.');
   }
+  // Migración columna post_url (usada por agente y /agent/history)
+  const urlCheck = await pool.query(`
+    SELECT column_name FROM information_schema.columns
+    WHERE table_name='comment_state' AND column_name='post_url'
+  `);
+  if (urlCheck.rows.length === 0) {
+    await pool.query(`ALTER TABLE comment_state ADD COLUMN post_url TEXT`);
+    console.log('initDB: columna post_url agregada.');
+  }
   console.log('DB lista - v37 - ' + new Date().toISOString());
 }
 
