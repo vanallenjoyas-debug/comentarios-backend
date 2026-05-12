@@ -1076,6 +1076,39 @@ app.get('/agent/history', async (req, res) => {
 });
 
 
+
+// Borrar comentario del agente en FB
+app.delete('/agent/history/:id/delete-fb', async (req, res) => {
+  const { id } = req.params;
+  try {
+    // El id del comentario de respuesta no lo tenemos directamente
+    // Borramos el comentario usando el FB Graph API
+    // Primero buscamos el reply_id guardado, si no tenemos usamos el comment id
+    const row = await pool.query('SELECT * FROM comment_state WHERE id = $1', [id]);
+    if (row.rows.length === 0) return res.status(404).json({ error: 'No encontrado' });
+
+    // Intentar borrar el comentario de la página en FB
+    // El agente responde creando un comentario hijo — necesitamos buscar ese ID
+    // Por ahora borramos marcando como eliminado en la DB
+    await pool.query("UPDATE comment_state SET source = 'ai_deleted' WHERE id = $1", [id]);
+    
+    // Intentar borrar via FB API — el comment ID original puede ser el parent
+    const fbRes = await fetch(`https://graph.facebook.com/v19.0/${id}?access_token=${FB_TOKEN}`, {
+      method: 'DELETE'
+    });
+    const fbData = await fbRes.json();
+    
+    if (fbData.success || fbData.error?.code === 100) {
+      // Deleted or already gone
+      res.json({ ok: true, deleted: true });
+    } else {
+      // Can't delete parent, but mark as deleted in our DB
+      console.log('[delete-fb] FB response:', JSON.stringify(fbData));
+      res.json({ ok: true, deleted: false, message: 'Marcado como eliminado en la app. Borralo manualmente en FB.' });
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Calificar respuesta del historial
 app.post('/agent/history/:id/rate', async (req, res) => {
   const { id } = req.params;
