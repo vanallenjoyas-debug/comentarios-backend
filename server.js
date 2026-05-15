@@ -77,15 +77,6 @@ async function initDB() {
   } else {
     console.log('initDB: columna categoria ya existe.');
   }
-  // Migración columna post_url (usada por agente y /agent/history)
-  const urlCheck = await pool.query(`
-    SELECT column_name FROM information_schema.columns
-    WHERE table_name='comment_state' AND column_name='post_url'
-  `);
-  if (urlCheck.rows.length === 0) {
-    await pool.query(`ALTER TABLE comment_state ADD COLUMN post_url TEXT`);
-    console.log('initDB: columna post_url agregada.');
-  }
   console.log('DB lista - v37 - ' + new Date().toISOString());
 }
 
@@ -154,12 +145,13 @@ Categorías:
 - proceso (preguntas sobre proceso técnico o químico)
 - aprender (quieren aprender joyería, consejos para empezar)
 - narracion (elogian cómo habla o explica)
-- compra (quieren comprar, preguntan envío o precio)
+- compra (SOLO cuando preguntan si Javi vende joyas/plata/oro, o preguntan precio/envío. Ej: "vendés plata?", "cuánto sale?". NO clasificar si: hablan de metales en el proceso, hacen preguntas técnicas, quieren venderle a Javi)
 - curso (preguntan por cursos o clases)
 - contaminacion (preguntan o critican sobre contaminación, residuos, medio ambiente, daño ecológico, tirar químicos)
 - gracioso (humor, chiste claro, comentario gracioso sin crítica)
 - otro
 
+IMPORTANTE: mencionar "plata", "oro" o "metal" NO es "compra" — solo si preguntan si Javi vende.
 IMPORTANTE: si el comentario mezcla humor con crítica ambiental o residuos, clasificar como "contaminacion" no "gracioso".
 
 Comentario: "${text.substring(0, 200)}"` }]
@@ -1076,12 +1068,7 @@ app.get('/agent/history', async (req, res) => {
       ? "WHERE source = 'ai'" 
       : "WHERE source IN ('ai','ai_rated_ok','ai_rated_fix')";
     const result = await pool.query(`
-      SELECT id, comment_text, reply_text, 
-             CASE WHEN video_title IS NULL OR video_title = '' OR LENGTH(video_title) < 5 
-                  THEN '(sin título)' 
-                  ELSE LEFT(video_title, 80) 
-             END as video_title,
-             post_url, created_at
+      SELECT id, comment_text, reply_text, video_title, post_url, created_at
       FROM comment_state
       ${whereClause}
       ORDER BY created_at DESC
