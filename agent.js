@@ -527,11 +527,19 @@ async function runAgent(network = 'fb') {
       for (const comment of postComments) {
         if (processed.has(comment.id)) continue;
 
-        // Skipear comentarios completamente vacíos
+        // Comentarios vacíos = emojis que FB no transmite como texto
         if (comment.text === null || comment.text === undefined || comment.text.trim() === '') {
-          skipped++;
+          const emojiReplies = ['🙌', '💪', '🔥', '😄', '👍', '🫡'];
+          const emojiReply = emojiReplies[Math.floor(Math.random() * emojiReplies.length)];
+          try {
+            await postFBReply(comment.id, emojiReply);
+            await saveAsAnswered(comment.id, '', emojiReply, comment.postMessage || '');
+            autoReplied++;
+            console.log('[agent] ✅ emoji reply para comentario vacío');
+          } catch(e) {
+            skipped++;
+          }
           processed.add(comment.id);
-          console.log('[agent] skipped (vacío):', JSON.stringify(comment.text));
           continue;
         }
 
