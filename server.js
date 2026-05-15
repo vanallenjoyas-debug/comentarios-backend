@@ -147,7 +147,7 @@ Categorías:
 - narracion (elogian cómo habla o explica)
 - compra (SOLO cuando preguntan si Javi vende joyas/plata/oro, o preguntan precio/envío. Ej: "vendés plata?", "cuánto sale?". NO clasificar si: hablan de metales en el proceso, hacen preguntas técnicas, quieren venderle a Javi)
 - curso (preguntan por cursos o clases)
-- contaminacion (preguntan o critican sobre contaminación, residuos, medio ambiente, daño ecológico, tirar químicos)
+- contaminacion (SOLO cuando preguntan directamente qué hace Javi con sus residuos químicos, si tira el ácido al desagüe, si contamina el ambiente con su trabajo. Ej: "qué hacés con el ácido usado?", "eso contamina?", "cómo descartás los químicos?". NO es contaminacion si dan consejos técnicos, hablan de procesos, o mencionan aceite/químicos en otro contexto)
 - gracioso (humor, chiste claro, comentario gracioso sin crítica)
 - otro
 
