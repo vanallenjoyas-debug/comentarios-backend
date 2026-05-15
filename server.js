@@ -145,7 +145,7 @@ Categorías:
 - proceso (preguntas sobre proceso técnico o químico)
 - aprender (quieren aprender joyería, consejos para empezar)
 - narracion (elogian cómo habla o explica)
-- compra (SOLO cuando preguntan si Javi vende joyas/plata/oro, o preguntan precio/envío. Ej: "vendés plata?", "cuánto sale?". NO clasificar si: hablan de metales en el proceso, hacen preguntas técnicas, quieren venderle a Javi)
+- compra (SOLO cuando le preguntan a Javi si vende sus joyas o material, o preguntan precio/envío. Ej: "vendés plata?", "cuánto sale?", "hacés envíos?". NO es compra: comentarios sobre el video, elogios, opiniones sobre el proceso, menciones de lingotes/plata/oro en contexto de proceso o contenido)
 - curso (preguntan por cursos o clases)
 - contaminacion (SOLO cuando preguntan directamente qué hace Javi con sus residuos químicos, si tira el ácido al desagüe, si contamina el ambiente con su trabajo. Ej: "qué hacés con el ácido usado?", "eso contamina?", "cómo descartás los químicos?". NO es contaminacion si dan consejos técnicos, hablan de procesos, o mencionan aceite/químicos en otro contexto)
 - gracioso (humor, chiste claro, comentario gracioso sin crítica)
