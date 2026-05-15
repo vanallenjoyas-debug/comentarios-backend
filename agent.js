@@ -527,11 +527,11 @@ async function runAgent(network = 'fb') {
       for (const comment of postComments) {
         if (processed.has(comment.id)) continue;
 
-        // Skipear comentarios vacíos o sin sentido
-        if (!comment.text || comment.text.trim().length < 2) {
+        // Skipear comentarios completamente vacíos
+        if (comment.text === null || comment.text === undefined || comment.text.trim() === '') {
           skipped++;
           processed.add(comment.id);
-          console.log('[agent] skipped (muy corto):', JSON.stringify(comment.text));
+          console.log('[agent] skipped (vacío):', JSON.stringify(comment.text));
           continue;
         }
 
@@ -673,6 +673,9 @@ async function fetchFBComments(answeredIds, discardedIds, queuedIds) {
     }));
 
     console.log('[agent/fetchFB] total sin filtrar:', allComments.length, '| nuevos:', filtered.length);
+    if (filtered.length > 0) {
+      console.log('[agent/fetchFB] muestra primer comentario - text:', JSON.stringify(filtered[0].text?.substring(0,50)), '| author:', filtered[0].author);
+    }
     return filtered.slice(0, 50);
   } catch(e) {
     console.error('[agent/fetchFB] error:', e.message);
