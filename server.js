@@ -735,14 +735,40 @@ app.post('/suggest-reply', async (req, res) => {
 
   let ejemplosBloque = '';
   try {
-    const categoria = await clasificarComentario(comment);
-    console.log(`[suggest] categoria detectada: ${categoria}`);
-    const examples = await getExamples(20, categoria);
-    console.log(`[suggest] ejemplos cargados: ${examples.length} (categoria: ${categoria})`);
+    // Sin clasificador — busca ejemplos similares directamente por similitud de texto
+    // Trae ejemplos de distintas categorías para que el modelo elija el tono correcto
+    const allExamples = await pool.query(`
+      SELECT comment_text, reply_text, video_title, categoria
+      FROM comment_state
+      WHERE status = 'answered' 
+        AND comment_text IS NOT NULL AND reply_text IS NOT NULL
+        AND LENGTH(comment_text) > 2 AND LENGTH(reply_text) > 2
+      ORDER BY RANDOM()
+      LIMIT 200
+    `);
+    
+    // Calcular similitud simple por palabras en común
+    const commentWords = new Set(comment.toLowerCase().split(/\s+/).filter(w => w.length > 3));
+    
+    const scored = allExamples.rows.map(ex => {
+      const exWords = new Set(ex.comment_text.toLowerCase().split(/\s+/).filter(w => w.length > 3));
+      let matches = 0;
+      commentWords.forEach(w => { if (exWords.has(w)) matches++; });
+      return { ...ex, score: matches };
+    });
+    
+    // Tomar los 5 más similares + 10 aleatorios para variedad
+    scored.sort((a, b) => b.score - a.score);
+    const topSimilar = scored.slice(0, 5);
+    const random = scored.slice(5).sort(() => Math.random() - 0.5).slice(0, 10);
+    const examples = [...topSimilar, ...random];
+    
+    console.log('[suggest] ejemplos por similitud:', topSimilar.length, '| aleatorios:', random.length, '| top match score:', topSimilar[0]?.score || 0);
+    
     if (examples.length > 0) {
       ejemplosBloque = '\n\nAPRENDÉ EL TONO de estos ejemplos reales de Javi. No copies ninguno igual — usalos como guía de estilo:\n';
       examples.forEach((ex, i) => {
-        ejemplosBloque += `\nEjemplo ${i+1}:${ex.video_title ? "\n(Video: "+ex.video_title+")" : ""}\nComentario: "${ex.comment_text}"\nRespuesta: "${ex.reply_text}"\n`;
+        ejemplosBloque += '\nEjemplo ' + (i+1) + ':' + (ex.video_title ? '\n(Video: ' + ex.video_title + ')' : '') + '\nComentario: "' + ex.comment_text + '"\nRespuesta: "' + ex.reply_text + '"\n';
       });
     }
   } catch(e) { console.log('[suggest] error cargando ejemplos:', e.message); }
