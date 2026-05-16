@@ -121,7 +121,6 @@ async function initAgentDB() {
       comments_fetched INT DEFAULT 0,
       comments_auto_replied INT DEFAULT 0,
       comments_queued INT DEFAULT 0,
-      comments_ignored INT DEFAULT 0,
       error TEXT
     )
   `);
@@ -147,6 +146,8 @@ async function initAgentDB() {
     `, [cat.nombre, cat.respuestas, cat.exclusiones]);
   }
 
+  // Ensure comments_ignored column exists (legacy tables may not have it)
+  try { await pool.query('ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS comments_ignored INT DEFAULT 0'); } catch(e) {}
   console.log('[agent] DB tables ok');
 }
 
@@ -398,8 +399,8 @@ async function runAgent(network = 'fb') {
     const msg = `🤖 <b>Agente - ciclo completado</b>\n📥 Procesados: <b>${fetched}</b>\n✅ Respondidos: <b>${replied}</b>\n⏭️ Ignorados: <b>${ignored}</b>`;
     await sendTelegram(msg);
 
-    await pool.query(`UPDATE agent_runs SET finished_at=NOW(), comments_fetched=$2, comments_auto_replied=$3, comments_ignored=$4 WHERE id=$1`,
-      [runId, fetched, replied, ignored]);
+    await pool.query(`UPDATE agent_runs SET finished_at=NOW(), comments_fetched=$2, comments_auto_replied=$3, comments_queued=$4 WHERE id=$1`,
+      [runId, fetched, replied, 0]);
 
     console.log(`[agent] ▶ FIN - respondidos:${replied} ignorados:${ignored}`);
     return { fetched, replied, ignored };
