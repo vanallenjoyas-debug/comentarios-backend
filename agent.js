@@ -189,7 +189,7 @@ function detectarHardcode(text) {
 
   // Curso
   if (/^curso$/i.test(text.trim()) ||
-      /\bcurso\b|\binfo\b|\binformaci[oó]n\b|\bme interesa\b|\bquiero aprender\b|\bquiero saber\b|\bclases\b/i.test(t)) return 'curso';
+      /\bcurso\b|\binfo\b|\binformaci[oó]n\b|\bme interesa\b|\bquiero aprender\b|\bquiero saber\b|\bclases\b|\bense[ñn]ame\b|\bm[aá]s info\b|\bm[aá]s informaci[oó]n\b/i.test(t)) return 'curso';
 
   return null;
 }
