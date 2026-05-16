@@ -178,6 +178,9 @@ function detectarHardcode(text) {
   // Emojis solos
   if (soloEmojis(text)) return 'emoji';
 
+  // Jaja / risas
+  if (/^[jaáhé !]+$/i.test(text.trim()) && /ja|ha/i.test(text)) return 'gracioso';
+
   // Yeti/híbrido
   if (/h[ií]brido|yeti|bruta\s*cocina|brutacocina|se parece/i.test(text)) return 'yeti';
 
