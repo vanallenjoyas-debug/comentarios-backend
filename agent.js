@@ -351,7 +351,7 @@ async function runAgent(network = 'fb') {
     const answeredIds = new Set(state.rows.filter(r => r.status === 'answered').map(r => r.id));
     const discardedIds = new Set(state.rows.filter(r => r.status === 'discarded').map(r => r.id));
 
-    const r = await fetch(`http://localhost:${PORT}/fb/comments`);
+    const r = await fetch(`http://localhost:${PORT}/fb/comments/agent`);
     if (!r.ok) throw new Error('Error fetching fb/comments: ' + r.status);
     const data = await r.json();
     const allComments = data.comments || [];
