@@ -539,6 +539,77 @@ app.get('/fb/comments', async (req, res) => {
   }
 });
 
+
+// Endpoint exclusivo del agente — busca más agresivo sin afectar la app
+app.get('/fb/comments/agent', async (req, res) => {
+  try {
+    const state = await getState();
+    const comments = [];
+    const seenIds = new Set();
+    let pageUrl = `https://graph.facebook.com/v19.0/${FB_PAGE_ID}/posts?fields=id,message,created_time&limit=20&access_token=${FB_TOKEN}`;
+    let pagesChecked = 0;
+    const MAX_PAGES = 10;
+
+    while (pageUrl && pagesChecked < MAX_PAGES) {
+      const r = await fetch(pageUrl);
+      const data = await r.json();
+      if (!r.ok) break;
+      const posts = data.data || [];
+      const allPostComments = await Promise.all(posts.map(post => fetchAllPostComments(post.id, FB_TOKEN).then(cs => ({ post, cs }))));
+      for (const { post, cs } of allPostComments) {
+        for (const c of cs) {
+          if (seenIds.has(c.id)) continue;
+          if (c.from?.id === FB_PAGE_ID) continue;
+          const replies = c.comments?.data || [];
+          if (replies.some(r => r.from?.id === FB_PAGE_ID)) continue;
+          if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
+          seenIds.add(c.id);
+          comments.push({
+            id: c.id, postId: post.id,
+            postMessage: post.message || '',
+            text: c.message, author: c.from?.name || 'Usuario',
+            publishedAt: c.created_time, network: 'fb'
+          });
+        }
+      }
+      pageUrl = data.paging?.next || null;
+      pagesChecked++;
+      if (comments.length >= 50) break;
+    }
+
+    // Reels
+    const reelsRes = await fetch(`https://graph.facebook.com/v19.0/${FB_PAGE_ID}/video_reels?fields=id,description,title,name,created_time&limit=50&access_token=${FB_TOKEN}`);
+    const reelsData = await reelsRes.json();
+    if (reelsRes.ok && reelsData.data) {
+      for (const reel of reelsData.data) {
+        if (comments.length >= 50) break;
+        const cs = await fetchAllPostComments(reel.id, FB_TOKEN);
+        for (const c of cs) {
+          if (seenIds.has(c.id)) continue;
+          if (c.from?.id === FB_PAGE_ID) continue;
+          const replies = c.comments?.data || [];
+          if (replies.some(r => r.from?.id === FB_PAGE_ID)) continue;
+          if (state.answered.includes(c.id) || state.discarded.includes(c.id)) continue;
+          seenIds.add(c.id);
+          comments.push({
+            id: c.id, postId: reel.id,
+            postMessage: reel.title || reel.name || reel.description || 'Reel sin título',
+            text: c.message, author: c.from?.name || 'Usuario',
+            publishedAt: c.created_time, network: 'fb'
+          });
+        }
+      }
+    }
+
+    comments.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
+    console.log(`[fb/comments/agent] ${comments.length} encontrados en ${pagesChecked} páginas`);
+    res.json({ comments: comments.slice(0, 50) });
+  } catch(e) {
+    console.error('fb/comments/agent error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/fb/comments/old', async (req, res) => {
   try {
     const state = await getState();
