@@ -119,7 +119,8 @@ async function initAgentDB() {
       finished_at TIMESTAMPTZ,
       network TEXT DEFAULT 'fb',
       comments_fetched INT DEFAULT 0,
-      comments_replied INT DEFAULT 0,
+      comments_auto_replied INT DEFAULT 0,
+      comments_queued INT DEFAULT 0,
       comments_ignored INT DEFAULT 0,
       error TEXT
     )
@@ -397,7 +398,7 @@ async function runAgent(network = 'fb') {
     const msg = `🤖 <b>Agente - ciclo completado</b>\n📥 Procesados: <b>${fetched}</b>\n✅ Respondidos: <b>${replied}</b>\n⏭️ Ignorados: <b>${ignored}</b>`;
     await sendTelegram(msg);
 
-    await pool.query(`UPDATE agent_runs SET finished_at=NOW(), comments_fetched=$2, comments_replied=$3, comments_ignored=$4 WHERE id=$1`,
+    await pool.query(`UPDATE agent_runs SET finished_at=NOW(), comments_fetched=$2, comments_auto_replied=$3, comments_ignored=$4 WHERE id=$1`,
       [runId, fetched, replied, ignored]);
 
     console.log(`[agent] ▶ FIN - respondidos:${replied} ignorados:${ignored}`);
@@ -416,7 +417,7 @@ async function runAgent(network = 'fb') {
 async function getAgentStats() {
   const runs = await pool.query(`SELECT * FROM agent_runs ORDER BY started_at DESC LIMIT 10`);
   const pending = await pool.query(`SELECT COUNT(*) as cnt FROM agent_runs`);
-  const totalReplied = await pool.query(`SELECT COALESCE(SUM(comments_replied), 0) as total FROM agent_runs`);
+  const totalReplied = await pool.query(`SELECT COALESCE(SUM(comments_auto_replied), 0) as total FROM agent_runs`);
 
   return {
     recent_runs: runs.rows,
