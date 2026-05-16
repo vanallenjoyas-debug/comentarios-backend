@@ -1225,6 +1225,94 @@ app.put('/agent/categories/:nombre/toggle', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+
+// ─── AUDITORÍA DE RESPUESTAS ──────────────────────────────────────────────────
+
+app.get('/agent/audit/last', async (req, res) => {
+  try {
+    const r = await pool.query(`
+      CREATE TABLE IF NOT EXISTS agent_audits (
+        id SERIAL PRIMARY KEY,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        last_comment_id TEXT,
+        report TEXT
+      )
+    `);
+    const last = await pool.query('SELECT * FROM agent_audits ORDER BY created_at DESC LIMIT 1');
+    res.json({ last: last.rows[0] || null });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/agent/audit', async (req, res) => {
+  try {
+    await pool.query(`CREATE TABLE IF NOT EXISTS agent_audits (id SERIAL PRIMARY KEY, created_at TIMESTAMPTZ DEFAULT NOW(), last_comment_id TEXT, report TEXT)`);
+    
+    // Get last audit date
+    const lastAudit = await pool.query('SELECT created_at FROM agent_audits ORDER BY created_at DESC LIMIT 1');
+    const since = lastAudit.rows[0]?.created_at || new Date(0);
+
+    // Get all AI responses since last audit
+    const responses = await pool.query(`
+      SELECT comment_text, reply_text, video_title, created_at
+      FROM comment_state
+      WHERE source = 'ai' AND created_at > $1
+      ORDER BY created_at ASC
+      LIMIT 200
+    `, [since]);
+
+    if (responses.rows.length === 0) {
+      return res.json({ report: 'No hay respuestas nuevas desde la última auditoría.', count: 0 });
+    }
+
+    const pairs = responses.rows.map((r, i) => {
+      const num = (i+1) + '. ';
+      const com = 'Comentario: "' + (r.comment_text || 'vacio') + '"';
+      const rep = 'Respuesta: "' + r.reply_text + '"';
+      return num + com + ' | ' + rep;
+    }).join('\n');
+
+    const prompt = `Sos un auditor del agente de comentarios de Javi, joyero argentino del canal Joyería Sudaca.
+
+Analizá estas ${responses.rows.length} respuestas automáticas y detectá problemas. El agente tiene estas categorías: elogio, yeti/híbrido, sudaca, curso/info, gracioso, residuos, no_metal, compra_joya, oro_electronica, y FAQs personalizados.
+
+RESPUESTAS A AUDITAR:
+${pairs}
+
+ANALIZÁ Y REPORTÁ:
+1. Respuestas incorrectas o fuera de contexto (con número de ejemplo)
+2. Patrones problemáticos (ej: "FAQ X captura comentarios que no debería")
+3. Comentarios que deberían ignorarse pero se respondieron
+4. Categorías que se confunden entre sí
+5. Lo que está funcionando bien
+
+Sé específico y accionable. Máximo 400 palabras. Formato claro con bullets.`;
+
+    const apiKey = (process.env.ANTHROPIC_API_KEY || '').trim();
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+    const data = await r.json();
+    const report = data.content?.[0]?.text || 'Error generando reporte';
+
+    // Save audit
+    await pool.query(
+      'INSERT INTO agent_audits (last_comment_id, report) VALUES ($1, $2)',
+      [responses.rows[responses.rows.length - 1].comment_text?.substring(0, 50) || '', report]
+    );
+
+    res.json({ report, count: responses.rows.length });
+  } catch(e) { 
+    console.error('[audit] error:', e.message);
+    res.status(500).json({ error: e.message }); 
+  }
+});
+
 // Historial de lo que auto-respondió el agente
 app.get('/agent/history', async (req, res) => {
   try {
