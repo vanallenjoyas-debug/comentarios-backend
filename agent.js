@@ -1,6 +1,5 @@
-// AGENTE AUTÓNOMO DE COMENTARIOS - v1
-// Se corre cada 2hs via cron interno
-// Aprende de cada 👍 que hace Javi
+// AGENTE AUTÓNOMO - v2 LIMPIO
+// Responde SOLO las categorías acordadas. Todo lo demás se ignora.
 
 const { Pool } = require('pg');
 const pool = new Pool({ connectionString: process.env.PG_URL });
@@ -10,48 +9,109 @@ const FB_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
 const ANTHROPIC_KEY = (process.env.ANTHROPIC_API_KEY || '').trim();
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const PORT = process.env.PORT || 3000;
 
-// ─── DB SETUP ────────────────────────────────────────────────────────────────
+// ─── RESPUESTAS POR CATEGORÍA ─────────────────────────────────────────────────
+
+const RESPUESTAS = {
+  elogio: [
+    'muchas gracias bro, me pone muy feliz que te guste 🙌',
+    'gracias por el aguante, me alegra un montón 💪',
+    'gracias de verdad, me pone muy feliz que me digas eso 😄',
+    'muchas gracias hermano, abrazo grande 🙌',
+    'increíble lo que me decís, gracias por el aguante!!! 💪'
+  ],
+  yeti: [
+    'HIBRIDOOOO 💪',
+    'eso dicen jaja 😄',
+    'varios me dicen eso, es verdad!!!!',
+    'puede ser ehhh 😂',
+    'jajaja me suelen decir que me parezco a alguien'
+  ],
+  sudaca: [
+    'esto es joyería sudaca papá 🔥',
+    '100% sudacas 💪',
+    'todos somos joyería sudaca papá',
+    'claro que sí, sudaca al mango 🔥'
+  ],
+  curso: [
+    'Mandame mensaje privado y te paso toda la info 👋',
+    'Escribime por privado bro 👋',
+    'Por privado te mando los detalles 🙌',
+    'Mandame un privado y te cuento todo 💪'
+  ],
+  gracioso: [
+    'jajaja top comment 😂',
+    'jajaja me alegra que te cause gracia, se hace lo que se puede 😄',
+    'jajajaja 😂',
+    'jaja buena esa 😂'
+  ],
+  residuos: [
+    'el ácido se neutraliza y se almacena para luego entregarlo a una empresa que se encarga de su neutralización final 💪',
+    'jamás al desagüe, se neutraliza y va a disposición final con empresa especializada 🙌',
+    'los residuos se neutralizan y se entregan a empresa de disposición final, el proceso está pensado para no contaminar 👋'
+  ],
+  no_metal: [
+    'no, no vendo metal mi amigo 🤷',
+    'no vendo metal bro, solo joyas y cursos 🙏',
+    'gracias por tenerme en cuenta pero no, metal no vendo 🙏'
+  ],
+  compra_joya: [
+    'Mandame un privado y vemos 👋',
+    'Escribime por privado 🙌',
+    'Mandame mensaje por inbox bro 👋'
+  ],
+  oro_electronica: [
+    'no, no refino oro de chatarra electrónica, no es rentable lamentablemente salvo que tengas cantidades muy grandes 🤷',
+    'ese proceso no lo hago bro, a baja escala no es rentable 🤷',
+    'no es un proceso rentable y es muy contaminante 🤷'
+  ]
+};
+
+function getRespuesta(categoria) {
+  const lista = RESPUESTAS[categoria];
+  if (!lista || lista.length === 0) return null;
+  return lista[Math.floor(Math.random() * lista.length)];
+}
+
+// ─── DB SETUP ─────────────────────────────────────────────────────────────────
 
 async function initAgentDB() {
-  // Contexto por video/post: qué tipo de contenido es, qué comentarios recibe
+  // Tabla de categorías con variaciones y exclusiones manejadas desde el panel
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS video_context (
-      post_id TEXT PRIMARY KEY,
-      title TEXT,
-      description TEXT,
-      content_type TEXT DEFAULT 'general',
-      typical_comments TEXT,
-      last_updated TIMESTAMPTZ DEFAULT NOW()
-    )
-  `);
-
-  // Ejemplos aprobados por Javi (👍) — el corazón del aprendizaje
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS reply_examples (
+    CREATE TABLE IF NOT EXISTS agent_categories (
       id SERIAL PRIMARY KEY,
-      comment_text TEXT NOT NULL,
-      reply_text TEXT NOT NULL,
-      post_id TEXT,
-      post_title TEXT,
-      categoria TEXT DEFAULT 'otro',
-      network TEXT DEFAULT 'fb',
-      source TEXT DEFAULT 'historico',
-      approved_at TIMESTAMPTZ DEFAULT NOW()
+      nombre TEXT NOT NULL UNIQUE,
+      respuestas TEXT[] NOT NULL DEFAULT '{}',
+      exclusiones TEXT[] NOT NULL DEFAULT '{}',
+      activa BOOLEAN DEFAULT true,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
 
-  // Migración: agregar columna source si no existe
-  const srcCheck = await pool.query(`
-    SELECT column_name FROM information_schema.columns
-    WHERE table_name='reply_examples' AND column_name='source'
+  // FAQ
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS faq (
+      id SERIAL PRIMARY KEY,
+      pregunta TEXT NOT NULL,
+      keywords TEXT NOT NULL,
+      respuestas TEXT[] NOT NULL,
+      activa BOOLEAN DEFAULT true,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
   `);
-  if (srcCheck.rows.length === 0) {
-    await pool.query(`ALTER TABLE reply_examples ADD COLUMN source TEXT DEFAULT 'historico'`);
-    console.log('[agent] columna source agregada a reply_examples');
-  }
 
-  // Log de cada corrida del agente
+  // FAQ ejemplos de matching
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS faq_examples (
+      id SERIAL PRIMARY KEY,
+      faq_id INT NOT NULL,
+      comment_text TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  // Log de corridas
   await pool.query(`
     CREATE TABLE IF NOT EXISTS agent_runs (
       id SERIAL PRIMARY KEY,
@@ -59,29 +119,32 @@ async function initAgentDB() {
       finished_at TIMESTAMPTZ,
       network TEXT DEFAULT 'fb',
       comments_fetched INT DEFAULT 0,
-      comments_auto_replied INT DEFAULT 0,
-      comments_queued INT DEFAULT 0,
-      comments_skipped INT DEFAULT 0,
+      comments_replied INT DEFAULT 0,
+      comments_ignored INT DEFAULT 0,
       error TEXT
     )
   `);
 
-  // Cola de revisión: comentarios que el agente no supo resolver con confianza
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS review_queue (
-      id TEXT PRIMARY KEY,
-      comment_text TEXT,
-      post_id TEXT,
-      post_title TEXT,
-      author TEXT,
-      network TEXT DEFAULT 'fb',
-      suggested_reply TEXT,
-      confidence FLOAT DEFAULT 0,
-      reason TEXT,
-      status TEXT DEFAULT 'pending',
-      created_at TIMESTAMPTZ DEFAULT NOW()
-    )
-  `);
+  // Inicializar categorías con los valores acordados si no existen
+  const cats = [
+    { nombre: 'elogio', respuestas: RESPUESTAS.elogio, exclusiones: [] },
+    { nombre: 'yeti', respuestas: RESPUESTAS.yeti, exclusiones: [] },
+    { nombre: 'sudaca', respuestas: RESPUESTAS.sudaca, exclusiones: [] },
+    { nombre: 'curso', respuestas: RESPUESTAS.curso, exclusiones: [] },
+    { nombre: 'gracioso', respuestas: RESPUESTAS.gracioso, exclusiones: [] },
+    { nombre: 'residuos', respuestas: RESPUESTAS.residuos, exclusiones: [] },
+    { nombre: 'no_metal', respuestas: RESPUESTAS.no_metal, exclusiones: [] },
+    { nombre: 'compra_joya', respuestas: RESPUESTAS.compra_joya, exclusiones: [] },
+    { nombre: 'oro_electronica', respuestas: RESPUESTAS.oro_electronica, exclusiones: [] }
+  ];
+
+  for (const cat of cats) {
+    await pool.query(`
+      INSERT INTO agent_categories (nombre, respuestas, exclusiones)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (nombre) DO NOTHING
+    `, [cat.nombre, cat.respuestas, cat.exclusiones]);
+  }
 
   console.log('[agent] DB tables ok');
 }
@@ -96,38 +159,75 @@ async function sendTelegram(msg) {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: msg, parse_mode: 'HTML' })
     });
-  } catch (e) {
-    console.error('[telegram] error:', e.message);
-  }
+  } catch(e) { console.error('[telegram] error:', e.message); }
 }
 
-// ─── CONTEXTO DEL VIDEO/POST ──────────────────────────────────────────────────
+// ─── DETECCIÓN DE CATEGORÍA ───────────────────────────────────────────────────
 
-async function getOrBuildPostContext(postId, postMessage, network) {
-  // Ver si ya tenemos contexto guardado
-  const existing = await pool.query(
-    `SELECT * FROM video_context WHERE post_id = $1`, [postId]
-  );
-  if (existing.rows.length > 0) return existing.rows[0];
+function soloEmojis(text) {
+  // Elimina emojis y espacios y ve si queda algo
+  const sinEmojis = text.replace(/[\u{1F000}-\u{1FFFF}\u{2600}-\u{27FF}\u{FE00}-\u{FEFF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FAFF}\uD800-\uDFFF\u2000-\u206F\u2700-\u27BF ]/gu, '').trim();
+  return sinEmojis.length === 0 && text.trim().length > 0;
+}
 
-  // Buscar ejemplos previos de este post para entender qué tipo de comentarios recibe
-  const examples = await pool.query(
-    `SELECT comment_text, reply_text FROM reply_examples WHERE post_id = $1 LIMIT 10`, [postId]
-  );
+function detectarHardcode(text) {
+  const t = text.toLowerCase();
 
-  // Construir contexto automáticamente con Claude
-  const contextPrompt = `Analizá este post de un joyero argentino (canal Joyería Sudaca) y describí brevemente:
-1. De qué trata (1 línea)
-2. Qué tipo de comentarios suele recibir (1 línea)
-3. Categoría del contenido: proceso_quimico | proceso_taller | herramientas | curso_info | general
+  // Emojis solos
+  if (soloEmojis(text)) return 'emoji';
 
-Mensaje del post: "${(postMessage || '').substring(0, 300)}"
-${examples.rows.length > 0 ? `\nComentarios previos en este post:\n${examples.rows.map(e => `- "${e.comment_text}"`).join('\n')}` : ''}
+  // Yeti/híbrido
+  if (/h[ií]brido|yeti|bruta\s*cocina|brutacocina|se parece/i.test(text)) return 'yeti';
 
-Respondé SOLO en formato JSON:
-{"title":"...","typical_comments":"...","content_type":"..."}`;
+  // Sudaca
+  if (/sudaca|sudaka|joyería sudaca|josheria/i.test(text)) return 'sudaca';
 
-  let contextData = { title: postMessage?.substring(0, 60) || postId, typical_comments: 'variados', content_type: 'general' };
+  // Curso
+  if (/^curso$/i.test(text.trim()) ||
+      /\bcurso\b|\binfo\b|\binformaci[oó]n\b|\bme interesa\b|\bquiero aprender\b|\bquiero saber\b|\bclases\b/i.test(t)) return 'curso';
+
+  return null;
+}
+
+async function detectarConHaiku(text, categorias) {
+  // Carga las categorías de la DB (con exclusiones actualizadas)
+  const catRows = await pool.query(`SELECT * FROM agent_categories WHERE activa = true`);
+  const catMap = {};
+  for (const row of catRows.rows) {
+    catMap[row.nombre] = row;
+  }
+
+  // También chequea FAQs
+  const faqs = await pool.query(`SELECT * FROM faq WHERE activa = true`);
+  const faqList = faqs.rows.map((f, i) => `${i+1}. FAQ: "${f.pregunta}" | Intención: "${f.keywords}"`).join('\n');
+  
+  // Construye ejemplos de FAQ si existen
+  let faqExamples = {};
+  try {
+    const exRows = await pool.query('SELECT faq_id, comment_text FROM faq_examples ORDER BY created_at DESC LIMIT 50');
+    for (const ex of exRows.rows) {
+      if (!faqExamples[ex.faq_id]) faqExamples[ex.faq_id] = [];
+      faqExamples[ex.faq_id].push(ex.comment_text);
+    }
+  } catch(e) {}
+
+  const prompt = `Sos un clasificador para el canal de YouTube/Facebook de Javi, un joyero argentino.
+
+Analizá este comentario y decidí a qué categoría pertenece. Respondé SOLO el nombre de la categoría o "ignorar".
+
+CATEGORÍAS:
+- elogio: felicitaciones, apoyo, "me encanta", "sos un crack", saludos desde otro país. NO es elogio si contiene insultos o críticas disfrazadas${catMap.elogio?.exclusiones?.length > 0 ? '. EXCLUIR si contiene: ' + catMap.elogio.exclusiones.join(', ') : ''}
+- gracioso: chiste, ironía, referencia a serie/película, comentario cómico, humor${catMap.gracioso?.exclusiones?.length > 0 ? '. EXCLUIR si contiene: ' + catMap.gracioso.exclusiones.join(', ') : ''}
+- residuos: preguntan específicamente qué hace Javi con sus residuos químicos, si contamina con sus procesos, si tira el ácido al desagüe${catMap.residuos?.exclusiones?.length > 0 ? '. EXCLUIR si contiene: ' + catMap.residuos.exclusiones.join(', ') : ''}
+- no_metal: preguntan si Javi vende plata, oro, metal, granalla, chapa en bruto${catMap.no_metal?.exclusiones?.length > 0 ? '. EXCLUIR si contiene: ' + catMap.no_metal.exclusiones.join(', ') : ''}
+- compra_joya: preguntan cómo comprarle una joya, precio de una pieza, dónde comprar${catMap.compra_joya?.exclusiones?.length > 0 ? '. EXCLUIR si contiene: ' + catMap.compra_joya.exclusiones.join(', ') : ''}
+- oro_electronica: preguntan si refina o extrae oro de placas electrónicas, chatarra electrónica${catMap.oro_electronica?.exclusiones?.length > 0 ? '. EXCLUIR si contiene: ' + catMap.oro_electronica.exclusiones.join(', ') : ''}
+${faqList.length > 0 ? faqs.rows.map((f, i) => `- faq_${f.id}: ${f.pregunta}${faqExamples[f.id]?.length > 0 ? ' (ej: "' + faqExamples[f.id].slice(0,2).join('", "') + '")' : ''}`).join('\n') : ''}
+- ignorar: cualquier otra cosa
+
+COMENTARIO: "${text.substring(0, 300)}"
+
+Respondé SOLO una palabra: el nombre exacto de la categoría o "ignorar".`;
 
   try {
     const r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -135,256 +235,80 @@ Respondé SOLO en formato JSON:
       headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
         model: 'claude-haiku-4-5',
-        max_tokens: 150,
-        messages: [{ role: 'user', content: contextPrompt }]
+        max_tokens: 20,
+        messages: [{ role: 'user', content: prompt }]
       })
     });
     const data = await r.json();
-    const text = data.content?.[0]?.text || '{}';
-    const clean = text.replace(/```json|```/g, '').trim();
-    contextData = { ...contextData, ...JSON.parse(clean) };
-  } catch (e) {
-    console.log('[agent] context build error:', e.message);
-  }
-
-  // Guardar para siempre
-  await pool.query(`
-    INSERT INTO video_context (post_id, title, description, content_type, typical_comments)
-    VALUES ($1, $2, $3, $4, $5)
-    ON CONFLICT (post_id) DO UPDATE SET 
-      typical_comments=$5, last_updated=NOW()
-  `, [postId, contextData.title, postMessage || '', contextData.content_type, contextData.typical_comments]);
-
-  return contextData;
-}
-
-// ─── EJEMPLOS DE APRENDIZAJE ──────────────────────────────────────────────────
-
-async function getLearnedExamples(postId, comentario, limit = 15) {
-  // ── PRIORIDAD 1: ejemplos aprobados manualmente en el agente ─────────────────
-  // Primero del mismo post, luego generales — estos son los más confiables
-  const agentPostExamples = await pool.query(`
-    SELECT comment_text, reply_text, post_title FROM reply_examples
-    WHERE post_id = $1 AND source = 'agente'
-    ORDER BY approved_at DESC LIMIT 8
-  `, [postId]);
-
-  const agentGeneralExamples = await pool.query(`
-    SELECT comment_text, reply_text, post_title FROM reply_examples
-    WHERE source = 'agente'
-    ORDER BY approved_at DESC LIMIT $1
-  `, [limit]);
-
-  const agentExamples = [...agentPostExamples.rows, ...agentGeneralExamples.rows];
-
-  // ── PRIORIDAD 2: historial viejo (comment_state migrado) ──────────────────────
-  // Solo se usa si el agente tiene menos de 10 ejemplos propios
-  let fallbackExamples = [];
-  if (agentExamples.length < 10) {
-    const needed = limit - agentExamples.length;
-    const fallback = await pool.query(`
-      SELECT comment_text, reply_text, post_title FROM reply_examples
-      WHERE source != 'agente' OR source IS NULL
-      ORDER BY RANDOM() LIMIT $1
-    `, [needed]);
-    fallbackExamples = fallback.rows;
-    if (fallbackExamples.length > 0) {
-      console.log(`[agent] usando ${agentExamples.length} ejemplos agente + ${fallbackExamples.length} fallback histórico`);
-    }
-  }
-
-  const all = [...agentExamples, ...fallbackExamples];
-
-  // Deduplicar
-  const seen = new Set();
-  return all.filter(e => {
-    if (seen.has(e.comment_text)) return false;
-    seen.add(e.comment_text);
-    return true;
-  }).slice(0, limit);
-}
-
-// ─── SELECCIÓN DE MODELO ──────────────────────────────────────────────────────
-// Haiku para el 90% (barato) — Sonnet solo para casos técnicos o complejos
-
-function selectModel(comment, postContext) {
-  const text = comment.toLowerCase();
-  const needsSonnet =
-    comment.length > 150 ||
-    (text.split('?').length - 1) >= 2 ||
-    /como|por que|cuanto|temperatura|acido|acido|proceso|refinad|pureza|aleacion|quilate|karat|formula|electro|voltaje|densidad|fundicion/.test(text) ||
-    (postContext && postContext.content_type === 'proceso_quimico' && text.includes('?'));
-  const model = needsSonnet ? 'claude-sonnet-4-20250514' : 'claude-haiku-4-5';
-  console.log('[agent] modelo:', model, '| chars:', comment.length);
-  return model;
-}
-
-
-// ─── BUSCAR FAQ MATCH ─────────────────────────────────────────────────────────
-
-async function checkFAQ(comment) {
-  try {
-    const faqs = await pool.query('SELECT * FROM faq WHERE activa = true');
-    if (faqs.rows.length === 0) return null;
-
-    // Traer ejemplos de matching aprobados por Javi para cada FAQ
-    let faqExamples = {};
-    try {
-      const exRows = await pool.query('SELECT faq_id, comment_text FROM faq_examples ORDER BY created_at DESC LIMIT 50');
-      for (const ex of exRows.rows) {
-        if (!faqExamples[ex.faq_id]) faqExamples[ex.faq_id] = [];
-        faqExamples[ex.faq_id].push(ex.comment_text);
-      }
-    } catch(e) {} // tabla puede no existir aún
-
-    // Construir lista de todas las FAQs en una sola llamada — más eficiente y más contexto
-    const faqList = faqs.rows.map((f, i) => {
-      const examples = faqExamples[f.id] || [];
-      const exBlock = examples.length > 0 ? ' | Ejemplos reales: ' + examples.slice(0,3).map(e => '"'+e+'"').join(', ') : '';
-      return `${i+1}. Pregunta: "${f.pregunta}" | Intención: "${f.keywords}"${exBlock}`;
-    }).join('\n');
-    
-    const matchPrompt = `Sos un clasificador de comentarios para el canal de YouTube/Facebook de Javi, un joyero argentino.
-
-Tu tarea: determinar si el comentario siguiente corresponde a alguna de estas preguntas frecuentes del canal.
-
-PREGUNTAS FRECUENTES:
-${faqList}
-
-COMENTARIO: "${comment.substring(0, 300)}"
-
-REGLAS IMPORTANTES:
-- Analizá la INTENCIÓN del comentario, no solo las palabras exactas
-- Un comentario corto o vago puede igualmente corresponder a una FAQ si el tema coincide
-- Considerá el contexto: es un canal de joyería que trabaja con ácidos, metales y procesos químicos
-- Si el comentario toca el tema de una FAQ aunque sea de forma indirecta, contá como match
-
-Si corresponde a alguna FAQ, respondé SOLO el número (ej: "1" o "2"). Si no corresponde a ninguna, respondé SOLO "no".`;
-
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5',
-        max_tokens: 5,
-        messages: [{ role: 'user', content: matchPrompt }]
-      })
-    });
-    const data = await r.json();
-    const answer = (data.content?.[0]?.text || '').trim().toLowerCase();
-    
-    if (answer === 'no' || answer === '') return null;
-    
-    const idx = parseInt(answer) - 1;
-    if (!isNaN(idx) && faqs.rows[idx]) {
-      const faq = faqs.rows[idx];
-      const respuesta = faq.respuestas[Math.floor(Math.random() * faq.respuestas.length)];
-      console.log('[agent] FAQ match "' + faq.pregunta.substring(0, 40) + '" para: "' + comment.substring(0, 40) + '"');
-      return respuesta;
-    }
-    return null;
+    const answer = (data.content?.[0]?.text || '').trim().toLowerCase().split(/\s/)[0];
+    console.log('[agent] haiku categoria:', answer, '| comment:', text.substring(0, 50));
+    return answer;
   } catch(e) {
-    console.error('[agent] checkFAQ error:', e.message);
-    return null;
+    console.error('[agent] haiku error:', e.message);
+    return 'ignorar';
   }
 }
 
-// ─── GENERADOR DE RESPUESTA ─────────────────────────────────────────────────
-// Usa el mismo /suggest-reply que ya funciona en la app — mismo prompt, mismas categorías
+// ─── PROCESAR COMENTARIO ──────────────────────────────────────────────────────
 
-async function generateReply(comment, postContext, examples) {
-  try {
-    const BACKEND_URL = `http://localhost:${process.env.PORT || 3000}`;
-    const r = await fetch(`${BACKEND_URL}/suggest-reply`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ comment: comment })
-    });
-    const data = await r.json();
-    const text = data.suggestion?.trim() || null;
-    if (!text) return null;
+async function procesarComentario(comment) {
+  const text = comment.text || '';
 
-    // Validar que no sea texto del prompt filtrado
-    const invalidPhrases = [
-      'esperando el comentario', 'espero el comentario', 'espero que me proporciones',
-      'comentario a responder', 'instrucción:', 'instruccion:', 'categorías y variaciones',
-      'como javi', 'respondé como', 'responder como javi', 'sos javi', 'soy javi romero',
-      'listo para responder', 'una vez que lo hagas', 'cuando envíes', 'cuando me envíes',
-      'proporciones el comentario', 'en personaje', 'estoy en personaje', 'joyería sudaca.',
-    ];
-    const textLower = text.toLowerCase();
-    if (invalidPhrases.some(p => textLower.includes(p))) {
-      console.error('[agent] respuesta inválida descartada:', text.substring(0, 80));
-      return null;
+  // Texto vacío = emoji que FB no transmite
+  if (!text || text.trim() === '') {
+    const emojis = ['🙌', '💪', '🔥', '😄', '👍', '🫡'];
+    return { categoria: 'emoji', respuesta: emojis[Math.floor(Math.random() * emojis.length)] };
+  }
+
+  // 1. Detección hardcodeada (rápida, sin IA)
+  const hardcode = detectarHardcode(text);
+  if (hardcode === 'emoji') {
+    const emojis = ['🙌', '💪', '🔥', '😄', '👍', '🫡'];
+    return { categoria: 'emoji', respuesta: emojis[Math.floor(Math.random() * emojis.length)] };
+  }
+  if (hardcode === 'yeti') return { categoria: 'yeti', respuesta: getRespuestaDB('yeti') || getRespuesta('yeti') };
+  if (hardcode === 'sudaca') return { categoria: 'sudaca', respuesta: getRespuestaDB('sudaca') || getRespuesta('sudaca') };
+  if (hardcode === 'curso') return { categoria: 'curso', respuesta: getRespuestaDB('curso') || getRespuesta('curso') };
+
+  // 2. Haiku decide para el resto
+  const categoria = await detectarConHaiku(text, {});
+
+  if (categoria === 'ignorar' || !categoria) return null;
+
+  // FAQ match
+  if (categoria.startsWith('faq_')) {
+    const faqId = parseInt(categoria.split('_')[1]);
+    const faqRow = await pool.query('SELECT * FROM faq WHERE id = $1 AND activa = true', [faqId]);
+    if (faqRow.rows.length > 0) {
+      const faq = faqRow.rows[0];
+      const respuesta = faq.respuestas[Math.floor(Math.random() * faq.respuestas.length)];
+      return { categoria: 'faq', respuesta };
     }
-    if (text.length < 3 || text.length > 500) return null;
-
-    return text;
-  } catch (e) {
-    console.error('[agent] generateReply error:', e.message);
     return null;
   }
+
+  // Categorías con Haiku
+  const cats = ['elogio', 'gracioso', 'residuos', 'no_metal', 'compra_joya', 'oro_electronica'];
+  if (cats.includes(categoria)) {
+    const respuesta = await getRespuestaDB(categoria) || getRespuesta(categoria);
+    if (respuesta) return { categoria, respuesta };
+  }
+
+  return null;
 }
 
-
-// ─── CALCULAR CONFIANZA ───────────────────────────────────────────────────────
-
-async function calculateConfidence(comment, postId) {
-  const text = comment.toLowerCase();
-
-  // REGLAS DURAS — confianza fija, no necesitan cálculo
-
-  // Solo emojis
-  const soloEmojis = comment.trim().replace(/[🀀-🿿☀-⟿︀-﻿🤀-🧿🨀-🫿 -  -⁯✀-➿ ]/gu, '');
-  if (soloEmojis.length === 0 && comment.trim().length > 0) {
-    console.log('[agent] confianza: 0.95 (solo emojis)');
-    return 0.95;
-  }
-
-  // Elogios claros
-  const esElogio = [
-    /yeti|h.brido/i,
-    /sudaca/i,
-    /genial|excelente|incre.ble|buen.simo|espectacular|crack|capo|groso|grosso/i,
-    /muy buen|buen video|buen contenido|gran video|gran trabajo/i,
-    /me encanta|me gust/i,
-    /sos el mejor|sos un genio|sos un capo|sos un crack/i,
-    /qué bueno|que bueno|qué lindo|que lindo/i,
-    /de donde sos|de d.nde sos|argentina/i,
-    /suscrib/i,
-    /felicit|bravo|brillante|top/i
-  ].some(p => p.test(text));
-
-  if (esElogio && comment.length < 150) {
-    console.log('[agent] confianza: 0.90 (elogio detectado)');
-    return 0.90;
-  }
-
-  // Emojis positivos con texto corto
-  if (/[🔥💪👏❤😍🙌👍⭐🏆]/.test(comment) && comment.length < 60) {
-    console.log('[agent] confianza: 0.82 (emoji positivo corto)');
-    return 0.82;
-  }
-
-  // CÁLCULO NORMAL para el resto
-  const postExamples = await pool.query(
-    'SELECT COUNT(*) as cnt FROM reply_examples WHERE post_id = $1', [postId]
-  );
-  const postExampleCount = parseInt(postExamples.rows[0].cnt);
-  const totalExamples = await pool.query('SELECT COUNT(*) as cnt FROM reply_examples');
-  const total = parseInt(totalExamples.rows[0].cnt);
-
-  let confidence = total >= 100 ? 0.50 : total >= 10 ? 0.40 : 0.25;
-  if (postExampleCount > 0) confidence += 0.15;
-  if (postExampleCount > 5) confidence += 0.10;
-  if (comment.length > 200) confidence -= 0.15;
-  if ((comment.match(/\?/g) || []).length >= 2) confidence -= 0.20;
-
-  console.log('[agent] confianza: ' + confidence.toFixed(2) + ' | total: ' + total + ' | post: ' + postExampleCount);
-  return Math.max(0.1, Math.min(0.95, confidence));
+async function getRespuestaDB(nombre) {
+  try {
+    const row = await pool.query('SELECT respuestas FROM agent_categories WHERE nombre = $1 AND activa = true', [nombre]);
+    if (row.rows.length > 0 && row.rows[0].respuestas.length > 0) {
+      const lista = row.rows[0].respuestas;
+      return lista[Math.floor(Math.random() * lista.length)];
+    }
+  } catch(e) {}
+  return null;
 }
 
-// ─── POSTEAR RESPUESTA EN FB ──────────────────────────────────────────────────
+// ─── POSTEAR EN FB ────────────────────────────────────────────────────────────
 
 async function postFBReply(commentId, text) {
   const r = await fetch(`https://graph.facebook.com/v19.0/${commentId}/comments`, {
@@ -397,8 +321,6 @@ async function postFBReply(commentId, text) {
   return data;
 }
 
-// ─── GUARDAR EN comment_state (compatible con sistema existente) ──────────────
-
 async function saveAsAnswered(id, commentText, replyText, videoTitle, postUrl) {
   try { await pool.query(`ALTER TABLE comment_state ADD COLUMN IF NOT EXISTS post_url TEXT`); } catch(e) {}
   await pool.query(`
@@ -408,416 +330,110 @@ async function saveAsAnswered(id, commentText, replyText, videoTitle, postUrl) {
   `, [id, commentText || '', replyText || '', videoTitle || '', postUrl || '']);
 }
 
-// ─── FILTRO DE RESIDUOS QUÍMICOS — RESPUESTA FIJA ────────────────────────────
-// Nunca pasa por el modelo. Responde siempre con texto exacto aprobado por Javi.
-
-const WASTE_RESPONSES = [
-  'claro que no lo tiro al inodoro, por favor! El ácido se neutraliza y se almacena para luego ser entregado a una empresa que se encarga de su neutralización final 💪',
-  'jamás al desagüe! Se neutraliza y va a disposición final con empresa especializada 🙌',
-  'eso nunca, se neutraliza con bicarbonato y se entrega a empresa de disposición final 👋'
-];
-
-function isWasteQuestion(comment) {
-  const text = comment.toLowerCase();
-  // Debe mencionar residuos/descarte Y contexto químico
-  const residuoPatterns = [
-    /tir(á|a|as|o)\s*(el\s*)?(ácido|acido|líquido|liquido|residuo|desecho)/,
-    /qué\s*hac(é|e)s?\s*(con\s*)?(el\s*)?(ácido|acido|residuo|desecho|líquido)/,
-    /cómo\s*(descart|eliminá|tir)/,
-    /inodoro|cañería|caneria|desagüe|desague|alcantarilla/,
-    /residuo|desecho|descarte|neutraliza/,
-    /contamina|medio\s*ambiente|ecolog/
-  ];
-  const acidContext = /ácido|acido|químico|quimico|nitrico|sulfúrico|sulfurico|solución|solucion/.test(text);
-  return residuoPatterns.some(p => p.test(text)) && (acidContext || /residuo|desecho|neutraliza/.test(text));
-}
-
-// ─── FILTRO DE SEGURIDAD QUÍMICA ─────────────────────────────────────────────
-// Comentarios con contenido químico/peligroso van SIEMPRE a cola, nunca auto-responden
-// Es un filtro de código — no depende del modelo
-
-function isChemicalRisk(comment) {
-  const text = comment.toLowerCase();
-  const patterns = [
-    // Ácidos y químicos
-    /ácido|acido|nitrico|sulfúrico|sulfurico|clorhídrico|clorhidrico|fluorhídrico|fluorhidrico/,
-    /agua regia|aqua regia|cianuro|cianur/,
-    /hidróxido|hidroxido|soda caustica|soda cáustica|lejía|lejia/,
-    /peróxido|peroxido|h2o2|hno3|h2so4|hcl/,
-    // Procesos peligrosos
-    /fundir|fundición|fundicion|derretir|derretí/,
-    /temperatura|grados|celsius|fahrenheit|°c|°f/,
-    /mezcl|combina|disuelv|diluí|dilui/,
-    /electrolisis|electrólisis|electrolit/,
-    /cloro|amoniaco|amoníaco/,
-    // Metales y procesos de refinado
-    /refinar|refinado|purificar|pureza|quilate|karat/,
-    /mercurio|plomo|arsénico|arsenico|cadmio/,
-    /soldar|soldadura|flux|borax|bórax/,
-    /decapar|decapado|mordiente/,
-    // Vapores y gases
-    /vapor|gas|humo|ventilación|ventilacion|respirar|inhalar/,
-    /tóxico|toxico|veneno|peligro|quemadura/
-  ];
-  return patterns.some(p => p.test(text));
-}
-
-// ─── CICLO PRINCIPAL DEL AGENTE ───────────────────────────────────────────────
+// ─── CICLO PRINCIPAL ──────────────────────────────────────────────────────────
 
 async function runAgent(network = 'fb') {
   console.log(`[agent] ▶ INICIO ciclo ${network} - ${new Date().toISOString()}`);
 
-  // Log de inicio
-  const runResult = await pool.query(
-    `INSERT INTO agent_runs (network) VALUES ($1) RETURNING id`, [network]
-  );
+  const runResult = await pool.query(`INSERT INTO agent_runs (network) VALUES ($1) RETURNING id`, [network]);
   const runId = runResult.rows[0].id;
 
-  let fetched = 0, autoReplied = 0, queued = 0, skipped = 0;
+  let fetched = 0, replied = 0, ignored = 0;
 
   try {
-    // ── 1. TRAER COMENTARIOS ──────────────────────────────────────────────────
-    // Solo traer IDs respondidos/descartados en los últimos 60 días para no bloquear todo
-    const state = await pool.query(`
-      SELECT id, status FROM comment_state 
-      WHERE created_at > NOW() - INTERVAL '60 days'
-    `);
+    // Traer comentarios via endpoint interno
+    const state = await pool.query(`SELECT id, status FROM comment_state WHERE created_at > NOW() - INTERVAL '60 days'`);
     const answeredIds = new Set(state.rows.filter(r => r.status === 'answered').map(r => r.id));
     const discardedIds = new Set(state.rows.filter(r => r.status === 'discarded').map(r => r.id));
 
-    // También chequear review_queue para no procesar dos veces
-    const inQueue = await pool.query(`SELECT id FROM review_queue WHERE status = 'pending'`);
-    const queuedIds = new Set(inQueue.rows.map(r => r.id));
-    
-    console.log('[agent] filtros cargados — answered:', answeredIds.size, '| discarded:', discardedIds.size, '| inQueue:', queuedIds.size);
-
-    let comments = [];
-
-    if (network === 'fb') {
-      comments = await fetchFBComments(answeredIds, discardedIds, queuedIds);
-    }
-    // YT se puede agregar después con el mismo patrón
-
-    fetched = comments.length;
-    console.log(`[agent] comentarios nuevos a procesar: ${fetched}`);
-
-    if (fetched === 0) {
-      await finishRun(runId, 0, 0, 0, 0);
-      console.log('[agent] nada nuevo, saliendo');
-      return { fetched: 0, autoReplied: 0, queued: 0, skipped: 0 };
-    }
-
-    // ── 2. AGRUPAR COMENTARIOS SIMILARES POR POST ─────────────────────────────
-    const byPost = {};
-    for (const c of comments) {
-      if (!byPost[c.postId]) byPost[c.postId] = [];
-      byPost[c.postId].push(c);
-    }
-
-    // ── 3. PROCESAR CADA COMENTARIO ───────────────────────────────────────────
-    for (const [postId, postComments] of Object.entries(byPost)) {
-      const firstComment = postComments[0];
-
-      // Construir/recuperar contexto del post
-      const postContext = await getOrBuildPostContext(postId, firstComment.postMessage, network);
-
-      // Agrupar similares dentro del post (para no responder 50 veces lo mismo)
-      const processed = new Set();
-
-      for (const comment of postComments) {
-        if (processed.has(comment.id)) continue;
-
-        // Comentarios vacíos = emojis que FB no transmite como texto
-        if (comment.text === null || comment.text === undefined || comment.text.trim() === '') {
-          const emojiReplies = ['🙌', '💪', '🔥', '😄', '👍', '🫡'];
-          const emojiReply = emojiReplies[Math.floor(Math.random() * emojiReplies.length)];
-          try {
-            await postFBReply(comment.id, emojiReply);
-            await saveAsAnswered(comment.id, '', emojiReply, comment.postMessage || '');
-            autoReplied++;
-            console.log('[agent] ✅ emoji reply para comentario vacío');
-          } catch(e) {
-            skipped++;
-          }
-          processed.add(comment.id);
-          continue;
-        }
-
-        // Filtro de seguridad química — va siempre a cola, nunca auto-responde
-        const chemRisk = isChemicalRisk(comment.text);
-        if (chemRisk) {
-          console.log(`[agent] ⚠️ riesgo químico detectado, mandando a cola: "${comment.text.substring(0, 50)}"`);
-        }
-
-        // Filtro de residuos — respuesta fija, nunca pasa por el modelo
-        if (isWasteQuestion(comment.text)) {
-          const wasteReply = WASTE_RESPONSES[Math.floor(Math.random() * WASTE_RESPONSES.length)];
-          try {
-            await postFBReply(comment.id, wasteReply);
-            await saveAsAnswered(comment.id, comment.text, wasteReply, comment.postMessage || postContext.title || '', comment.postUrl);
-            autoReplied++;
-            console.log('[agent] ✅ residuos (respuesta fija): "' + comment.text.substring(0, 50) + '"');
-          } catch(e) {
-            await addToQueue(comment, postContext, wasteReply, 0.99, 'residuos_fijo');
-            queued++;
-          }
-          processed.add(comment.id);
-          await new Promise(r => setTimeout(r, 500));
-          continue;
-        }
-
-        // Chequear FAQ primero — respuesta canónica si hay match
-        const faqReply = await checkFAQ(comment.text);
-        if (faqReply && !chemRisk) {
-          try {
-            await postFBReply(comment.id, faqReply);
-            await saveAsAnswered(comment.id, comment.text, faqReply, comment.postMessage || postContext.title || '', comment.postUrl);
-            autoReplied++;
-            console.log('[agent] ✅ FAQ auto-respondido: "' + comment.text.substring(0, 50) + '"');
-          } catch(e) {
-            await addToQueue(comment, postContext, faqReply, 0.95, 'faq_match');
-            queued++;
-          }
-          processed.add(comment.id);
-          await new Promise(r => setTimeout(r, 500));
-          continue;
-        }
-
-        // Calcular confianza
-        const confidence = chemRisk ? 0 : await calculateConfidence(comment.text, postId);
-
-        // Generar respuesta
-        const reply = await generateReply(comment.text, null, null);
-
-        if (!reply) {
-          // Si el modelo no genera respuesta válida, va a la cola sin sugerencia
-          await addToQueue(comment, postContext, '', 0.1, 'modelo_no_respondio');
-          queued++;
-          processed.add(comment.id);
-          continue;
-        }
-
-        if (confidence >= 0.55 && !chemRisk) {
-          // ── AUTO-RESPONDER ──────────────────────────────────────────────────
-          try {
-            await postFBReply(comment.id, reply);
-            await saveAsAnswered(comment.id, comment.text, reply, comment.postMessage || postContext.title || '', comment.postUrl);
-            autoReplied++;
-            console.log(`[agent] ✅ auto-respondido: "${comment.text.substring(0, 50)}..."`);
-          } catch (e) {
-            console.error(`[agent] error posteando:`, e.message);
-            // Si falla el posteo, mandar a cola de revisión
-            await addToQueue(comment, postContext, reply, confidence, 'error_posteo');
-            queued++;
-          }
-        } else {
-          // ── MANDAR A COLA DE REVISIÓN ───────────────────────────────────────
-          await addToQueue(comment, postContext, reply, confidence, chemRisk ? 'quimica_siempre_manual' : 'baja_confianza');
-          queued++;
-          console.log(`[agent] 👁️ en cola (conf=${confidence.toFixed(2)}): "${comment.text.substring(0, 50)}..."`);
-        }
-
-        processed.add(comment.id);
-
-        // Pequeña pausa para no saturar la API
-        await new Promise(r => setTimeout(r, 500));
-      }
-    }
-
-    // ── 4. NOTIFICAR POR TELEGRAM ─────────────────────────────────────────────
-    const msg = `🤖 <b>Agente de comentarios - ciclo completado</b>
-
-📥 Comentarios procesados: <b>${fetched}</b>
-✅ Respondidos automáticamente: <b>${autoReplied}</b>
-👁️ En cola para revisión: <b>${queued}</b>
-⏭️ Saltados: <b>${skipped}</b>
-
-${queued > 0 ? `⚠️ Tenés <b>${queued} comentarios</b> esperando tu revisión en el panel.` : '✨ Sin pendientes, todo en orden.'}`;
-
-    await sendTelegram(msg);
-
-    await finishRun(runId, fetched, autoReplied, queued, skipped);
-    console.log(`[agent] ▶ FIN ciclo - auto:${autoReplied} cola:${queued} skip:${skipped}`);
-
-    return { fetched, autoReplied, queued, skipped };
-
-  } catch (e) {
-    console.error('[agent] ERROR en ciclo:', e.message);
-    await pool.query(`UPDATE agent_runs SET finished_at=NOW(), error=$2 WHERE id=$1`, [runId, e.message]);
-    await sendTelegram(`❌ <b>Error en agente de comentarios</b>\n${e.message}`);
-    throw e;
-  }
-}
-
-// ─── FETCH FB COMMENTS ────────────────────────────────────────────────────────
-
-async function fetchFBComments(answeredIds, discardedIds, queuedIds) {
-  console.log('[agent/fetchFB] usando endpoint interno /fb/comments');
-  try {
-    // Usar el mismo endpoint que ya funciona en la app — rápido y confiable
-    const BACKEND_URL = `http://localhost:${process.env.PORT || 3000}`;
-    const r = await fetch(`${BACKEND_URL}/fb/comments`);
-    if (!r.ok) {
-      console.error('[agent/fetchFB] error endpoint:', r.status);
-      return [];
-    }
+    const r = await fetch(`http://localhost:${PORT}/fb/comments`);
+    if (!r.ok) throw new Error('Error fetching fb/comments: ' + r.status);
     const data = await r.json();
     const allComments = data.comments || [];
-    
-    // Filtrar los que ya procesamos
-    const filtered = allComments.filter(c => 
-      !answeredIds.has(c.id) && 
-      !discardedIds.has(c.id) && 
-      !queuedIds.has(c.id)
+
+    const comments = allComments.filter(c =>
+      !answeredIds.has(c.id) && !discardedIds.has(c.id)
     ).map(c => ({
       id: c.id,
       postId: c.postId || c.id,
       postMessage: c.postMessage || '',
       postUrl: c.postUrl || '',
       text: c.text || c.message || '',
-      author: c.author || c.authorName || 'Usuario',
-      publishedAt: c.publishedAt || c.created_time,
+      author: c.author || 'Usuario',
       network: 'fb'
-    }));
+    })).slice(0, 50);
 
-    console.log('[agent/fetchFB] total sin filtrar:', allComments.length, '| nuevos:', filtered.length);
-    if (filtered.length > 0) {
-      console.log('[agent/fetchFB] muestra primer comentario - text:', JSON.stringify(filtered[0].text?.substring(0,50)), '| author:', filtered[0].author);
+    fetched = comments.length;
+    console.log(`[agent] comentarios nuevos: ${fetched}`);
+
+    for (const comment of comments) {
+      const result = await procesarComentario(comment);
+
+      if (!result) {
+        ignored++;
+        console.log(`[agent] ignorado: "${comment.text.substring(0, 50)}"`);
+        // Marcar como visto para no reprocesar
+        await pool.query(`
+          INSERT INTO comment_state (id, status, comment_text, video_title, source)
+          VALUES ($1, 'discarded', $2, $3, 'ai_ignored')
+          ON CONFLICT (id) DO NOTHING
+        `, [comment.id, comment.text || '', comment.postMessage || '']);
+        continue;
+      }
+
+      try {
+        await postFBReply(comment.id, result.respuesta);
+        await saveAsAnswered(comment.id, comment.text, result.respuesta, comment.postMessage, comment.postUrl);
+        replied++;
+        console.log(`[agent] ✅ ${result.categoria}: "${comment.text.substring(0, 40)}" → "${result.respuesta}"`);
+      } catch(e) {
+        console.error('[agent] error posteando:', e.message);
+        ignored++;
+      }
+
+      await new Promise(r => setTimeout(r, 600));
     }
-    return filtered.slice(0, 50);
+
+    const msg = `🤖 <b>Agente - ciclo completado</b>\n📥 Procesados: <b>${fetched}</b>\n✅ Respondidos: <b>${replied}</b>\n⏭️ Ignorados: <b>${ignored}</b>`;
+    await sendTelegram(msg);
+
+    await pool.query(`UPDATE agent_runs SET finished_at=NOW(), comments_fetched=$2, comments_replied=$3, comments_ignored=$4 WHERE id=$1`,
+      [runId, fetched, replied, ignored]);
+
+    console.log(`[agent] ▶ FIN - respondidos:${replied} ignorados:${ignored}`);
+    return { fetched, replied, ignored };
+
   } catch(e) {
-    console.error('[agent/fetchFB] error:', e.message);
-    return [];
+    console.error('[agent] ERROR:', e.message);
+    await pool.query(`UPDATE agent_runs SET finished_at=NOW(), error=$2 WHERE id=$1`, [runId, e.message]);
+    await sendTelegram(`❌ <b>Error en agente</b>\n${e.message}`);
+    throw e;
   }
 }
 
-
-async function fetchAllPostComments(postId) {
-  // Traer comentarios sin respuesta — filter=stream trae todos, luego filtramos los que no tienen reply de la página
-  // Usamos filter=toplevel para evitar subcomentarios y order=reverse_chronological para los más nuevos primero
-  const url = `https://graph.facebook.com/v19.0/${postId}/comments?fields=id,message,from,created_time,comments{id,from,message}&limit=100&order=reverse_chronological&filter=stream&access_token=${FB_TOKEN}`;
-  const r = await fetch(url);
-  const data = await r.json();
-  if (!r.ok || !data.data) return [];
-  return data.data;
-}
-
-// ─── COLA DE REVISIÓN ─────────────────────────────────────────────────────────
-
-async function addToQueue(comment, postContext, suggestedReply, confidence, reason) {
-  // Ensure post_url column exists
-  try {
-    await pool.query(`ALTER TABLE review_queue ADD COLUMN IF NOT EXISTS post_url TEXT`);
-  } catch(e) {}
-  await pool.query(`
-    INSERT INTO review_queue (id, comment_text, post_id, post_title, author, network, suggested_reply, confidence, reason, post_url)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-    ON CONFLICT (id) DO NOTHING
-  `, [
-    comment.id,
-    comment.text,
-    comment.postId,
-    comment.postMessage || postContext?.title || '',
-    comment.author,
-    comment.network || 'fb',
-    suggestedReply,
-    confidence,
-    reason,
-    comment.postUrl || ''
-  ]);
-}
-
-// ─── APRENDIZAJE: APROBAR RESPUESTA (👍) ──────────────────────────────────────
-
-async function approveReply(commentId, finalReplyText) {
-  // Traer datos de la cola
-  const q = await pool.query(`SELECT * FROM review_queue WHERE id = $1`, [commentId]);
-  if (q.rows.length === 0) return;
-  const item = q.rows[0];
-
-  // Postear en FB primero — si falla, no guardamos nada
-  await postFBReply(commentId, finalReplyText);
-
-  // Guardar como ejemplo aprobado
-  await pool.query(`
-    INSERT INTO reply_examples (comment_text, reply_text, post_id, post_title, network, source)
-    VALUES ($1, $2, $3, $4, $5, 'agente')
-  `, [item.comment_text, finalReplyText, item.post_id, item.post_title, item.network]);
-
-  // Marcar como procesado en la cola
-  await pool.query(`UPDATE review_queue SET status = 'approved' WHERE id = $1`, [commentId]);
-
-  // Marcar como respondido — source='javi' para que NO aparezca en historial IA
-  await pool.query(`
-    INSERT INTO comment_state (id, status, comment_text, reply_text, video_title, source)
-    VALUES ($1, 'answered', $2, $3, $4, 'javi')
-    ON CONFLICT (id) DO UPDATE SET status='answered', reply_text=$3, video_title=$4, source='javi'
-  `, [commentId, item.comment_text, finalReplyText, item.post_title || '']);
-
-  console.log(`[agent] 👍 aprendido: "${item.comment_text.substring(0, 50)}"`);
-}
-
-// ─── RECHAZAR Y REGENERAR (👎) ────────────────────────────────────────────────
-
-async function rejectAndRegenerate(commentId) {
-  const q = await pool.query(`SELECT * FROM review_queue WHERE id = $1`, [commentId]);
-  if (q.rows.length === 0) return [];
-  const item = q.rows[0];
-
-  const postContext = await pool.query(`SELECT * FROM video_context WHERE post_id = $1`, [item.post_id]);
-  const examples = await getLearnedExamples(item.post_id, item.comment_text);
-
-  // Generar 3 variaciones distintas
-  const variations = [];
-  for (let i = 0; i < 3; i++) {
-    const v = await generateReply(item.comment_text, postContext.rows[0], examples);
-    if (v && !variations.includes(v)) variations.push(v);
-    await new Promise(r => setTimeout(r, 300));
-  }
-
-  return variations;
-}
-
-// ─── FINISH RUN ───────────────────────────────────────────────────────────────
-
-async function finishRun(runId, fetched, autoReplied, queued, skipped) {
-  await pool.query(`
-    UPDATE agent_runs SET 
-      finished_at=NOW(), 
-      comments_fetched=$2, 
-      comments_auto_replied=$3, 
-      comments_queued=$4,
-      comments_skipped=$5
-    WHERE id=$1
-  `, [runId, fetched, autoReplied, queued, skipped]);
-}
-
-// ─── ESTADÍSTICAS ─────────────────────────────────────────────────────────────
+// ─── STATS ────────────────────────────────────────────────────────────────────
 
 async function getAgentStats() {
-  const runs = await pool.query(`
-    SELECT * FROM agent_runs ORDER BY started_at DESC LIMIT 10
-  `);
-  const examples = await pool.query(`SELECT COUNT(*) as cnt FROM reply_examples`);
-  const pending = await pool.query(`SELECT COUNT(*) as cnt FROM review_queue WHERE status = 'pending'`);
-  const totalAutoReplied = await pool.query(`
-    SELECT COALESCE(SUM(comments_auto_replied), 0) as total FROM agent_runs
-  `);
+  const runs = await pool.query(`SELECT * FROM agent_runs ORDER BY started_at DESC LIMIT 10`);
+  const pending = await pool.query(`SELECT COUNT(*) as cnt FROM agent_runs`);
+  const totalReplied = await pool.query(`SELECT COALESCE(SUM(comments_replied), 0) as total FROM agent_runs`);
 
   return {
     recent_runs: runs.rows,
-    total_learned_examples: parseInt(examples.rows[0].cnt),
-    pending_review: parseInt(pending.rows[0].cnt),
-    total_auto_replied: parseInt(totalAutoReplied.rows[0].total)
+    total_auto_replied: parseInt(totalReplied.rows[0].total),
+    pending_review: 0
   };
+}
+
+async function getCategories() {
+  const rows = await pool.query(`SELECT * FROM agent_categories ORDER BY nombre`);
+  return rows.rows;
 }
 
 module.exports = {
   initAgentDB,
   runAgent,
-  approveReply,
-  rejectAndRegenerate,
   getAgentStats,
-  addToQueue,
+  getCategories,
   sendTelegram
 };
