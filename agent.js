@@ -271,9 +271,9 @@ async function procesarComentario(comment) {
     const emojis = ['🙌', '💪', '🔥', '😄', '👍', '🫡'];
     return { categoria: 'emoji', respuesta: emojis[Math.floor(Math.random() * emojis.length)] };
   }
-  if (hardcode === 'yeti') return { categoria: 'yeti', respuesta: getRespuestaDB('yeti') || getRespuesta('yeti') };
-  if (hardcode === 'sudaca') return { categoria: 'sudaca', respuesta: getRespuestaDB('sudaca') || getRespuesta('sudaca') };
-  if (hardcode === 'curso') return { categoria: 'curso', respuesta: getRespuestaDB('curso') || getRespuesta('curso') };
+  if (hardcode === 'yeti') return { categoria: 'yeti', respuesta: await getRespuestaDB('yeti') || getRespuesta('yeti') };
+  if (hardcode === 'sudaca') return { categoria: 'sudaca', respuesta: await getRespuestaDB('sudaca') || getRespuesta('sudaca') };
+  if (hardcode === 'curso') return { categoria: 'curso', respuesta: await getRespuestaDB('curso') || getRespuesta('curso') };
 
   // 2. Haiku decide para el resto
   const categoria = await detectarConHaiku(text, {});
