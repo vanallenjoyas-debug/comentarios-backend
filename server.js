@@ -1104,6 +1104,56 @@ app.get('/examples', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CATEGORÍAS DEL AGENTE — panel para manejar respuestas y exclusiones
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Traer todas las categorías
+app.get('/agent/categories', async (req, res) => {
+  try {
+    const rows = await pool.query('SELECT * FROM agent_categories ORDER BY nombre');
+    res.json({ categories: rows.rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Actualizar respuestas de una categoría
+app.put('/agent/categories/:nombre/respuestas', async (req, res) => {
+  const { respuestas } = req.body;
+  if (!respuestas || !Array.isArray(respuestas)) return res.status(400).json({ error: 'Faltan respuestas' });
+  try {
+    await pool.query(
+      'UPDATE agent_categories SET respuestas=$1, updated_at=NOW() WHERE nombre=$2',
+      [respuestas, req.params.nombre]
+    );
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Actualizar exclusiones de una categoría
+app.put('/agent/categories/:nombre/exclusiones', async (req, res) => {
+  const { exclusiones } = req.body;
+  if (!exclusiones || !Array.isArray(exclusiones)) return res.status(400).json({ error: 'Faltan exclusiones' });
+  try {
+    await pool.query(
+      'UPDATE agent_categories SET exclusiones=$1, updated_at=NOW() WHERE nombre=$2',
+      [exclusiones, req.params.nombre]
+    );
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Activar/desactivar categoría
+app.put('/agent/categories/:nombre/toggle', async (req, res) => {
+  try {
+    await pool.query(
+      'UPDATE agent_categories SET activa = NOT activa, updated_at=NOW() WHERE nombre=$1',
+      [req.params.nombre]
+    );
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Historial de lo que auto-respondió el agente
 app.get('/agent/history', async (req, res) => {
   try {
