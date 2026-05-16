@@ -429,7 +429,16 @@ async function runAgent(network = 'fb') {
     fetched = comments.length;
     console.log(`[agent] comentarios nuevos: ${fetched}`);
 
+    const processedThisCycle = new Set();
     for (const comment of comments) {
+      // Skip if already processed in this cycle (prevents double-processing when cron and manual run overlap)
+      if (processedThisCycle.has(comment.id)) continue;
+      processedThisCycle.add(comment.id);
+
+      // Double-check DB — another cycle may have already answered this
+      const already = await pool.query('SELECT id FROM comment_state WHERE id = $1', [comment.id]);
+      if (already.rows.length > 0) continue;
+
       const result = await procesarComentario(comment);
 
       if (!result) {
