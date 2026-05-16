@@ -1085,6 +1085,25 @@ app.post('/agent/faq/:id/add-example', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+
+// Exportar ejemplos para análisis
+app.get('/examples', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 500;
+    const result = await pool.query(`
+      SELECT comment_text, reply_text, categoria
+      FROM comment_state
+      WHERE status = 'answered'
+        AND comment_text IS NOT NULL AND comment_text != ''
+        AND reply_text IS NOT NULL AND reply_text != ''
+        AND LENGTH(comment_text) > 2
+      ORDER BY RANDOM()
+      LIMIT $1
+    `, [limit]);
+    res.json({ total: result.rows.length, examples: result.rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Historial de lo que auto-respondió el agente
 app.get('/agent/history', async (req, res) => {
   try {
