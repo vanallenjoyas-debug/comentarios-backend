@@ -256,6 +256,60 @@ Respondé SOLO una palabra: el nombre exacto de la categoría o "ignorar".`;
 
 // ─── PROCESAR COMENTARIO ──────────────────────────────────────────────────────
 
+
+async function checkFAQDirect(text) {
+  try {
+    const faqs = await pool.query('SELECT * FROM faq WHERE activa = true');
+    if (faqs.rows.length === 0) return null;
+
+    let faqExamples = {};
+    try {
+      const exRows = await pool.query('SELECT faq_id, comment_text FROM faq_examples ORDER BY created_at DESC LIMIT 50');
+      for (const ex of exRows.rows) {
+        if (!faqExamples[ex.faq_id]) faqExamples[ex.faq_id] = [];
+        faqExamples[ex.faq_id].push(ex.comment_text);
+      }
+    } catch(e) {}
+
+    const faqList = faqs.rows.map((f, i) => {
+      const examples = faqExamples[f.id] || [];
+      const exBlock = examples.length > 0 ? ' | Ejemplos: ' + examples.slice(0,3).map(e => '"'+e+'"').join(', ') : '';
+      return `${i+1}. FAQ: "${f.pregunta}" | Intención: "${f.keywords}"${exBlock}`;
+    }).join('\n');
+
+    const prompt = `Sos un clasificador para el canal de Javi, joyero argentino.
+
+¿Este comentario corresponde a alguna de estas preguntas frecuentes? Respondé SOLO el número o "no".
+
+${faqList}
+
+COMENTARIO: "${text.substring(0, 300)}"
+
+Respondé SOLO un número (ej: "1") o "no".`;
+
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-haiku-4-5', max_tokens: 5, messages: [{ role: 'user', content: prompt }] })
+    });
+    const data = await r.json();
+    const answer = (data.content?.[0]?.text || '').trim().toLowerCase();
+    if (answer === 'no' || answer === '') return null;
+
+    const idx = parseInt(answer) - 1;
+    if (!isNaN(idx) && faqs.rows[idx]) {
+      const faq = faqs.rows[idx];
+      const respuesta = faq.respuestas[Math.floor(Math.random() * faq.respuestas.length)];
+      console.log('[agent] FAQ directo match "' + faq.pregunta.substring(0,40) + '" para: "' + text.substring(0,40) + '"');
+      return { categoria: 'faq', respuesta };
+    }
+    return null;
+  } catch(e) {
+    console.error('[agent] checkFAQDirect error:', e.message);
+    return null;
+  }
+}
+
 async function procesarComentario(comment) {
   const text = comment.text || '';
 
@@ -275,7 +329,11 @@ async function procesarComentario(comment) {
   if (hardcode === 'sudaca') return { categoria: 'sudaca', respuesta: await getRespuestaDB('sudaca') || getRespuesta('sudaca') };
   if (hardcode === 'curso') return { categoria: 'curso', respuesta: await getRespuestaDB('curso') || getRespuesta('curso') };
 
-  // 2. Haiku decide para el resto
+  // 2. FAQ primero — tus respuestas específicas tienen prioridad
+  const faqResult = await checkFAQDirect(text);
+  if (faqResult) return faqResult;
+
+  // 3. Haiku decide para el resto
   const categoria = await detectarConHaiku(text, {});
 
   if (categoria === 'ignorar' || !categoria) return null;
